@@ -176,6 +176,61 @@ test('planning a shadowed target reports already-deleted', () => {
   assert.throws(() => planRange(log, nodes, { mode: 'message', seq: 4 }), (error) => error instanceof PlanError && error.code === 'already-deleted')
 })
 
+test('reply plan ignores the protected system head when the human prompt is gone', () => {
+  // The human prompt (seq 4) is deleted first; without the head guard the
+  // system node (seq 3, appended inside step 1) would anchor the window and
+  // make the placeholder between it and the reply look like foreign content.
+  const log = [...baseLog(), deletionReplacement(15, [4], 'message')]
+  const nodes = foldSurface(log).nodes
+  assert.deepEqual(nodes, [3, 15, 5, 6, 7, 8, 12, 13])
+  const plan = planRange(log, nodes, { mode: 'reply', seq: 8 })
+  assert.deepEqual(plan.shadowed, [5, 6, 7, 8])
+  assert.equal(plan.turn, 1)
+})
+
+test('a reply window may shadow this plugin own placeholders', () => {
+  const log = [
+    event(0, 'turn/start', { turn: 1 }),
+    event(1, 'step/start', { turn: 1, step: 1 }),
+    systemMessage(2, 'sys-1', 1, 1),
+    userMessage(3, 'u-1'),
+    assistantMessage(4, 'a-1', 1, 1),
+    userMessage(5, 'ctx-1', { kind: 'plugin', plugin: 'other-plugin' }),
+    toolResult(6, 't-1', 1, 1, 'call-1'),
+    event(7, 'turn/end', { turn: 1 }),
+  ]
+  const withPlaceholder = [...log, deletionReplacement(8, [5], 'message')]
+  const nodes = foldSurface(withPlaceholder).nodes
+  assert.deepEqual(nodes, [2, 3, 4, 8, 6])
+  const plan = planRange(withPlaceholder, nodes, { mode: 'reply', seq: 4 })
+  assert.deepEqual(plan.shadowed, [4, 8, 6])
+})
+
+test('a foreign node inside the window still refuses the plan', () => {
+  const log = [
+    event(0, 'turn/start', { turn: 1 }),
+    event(1, 'step/start', { turn: 1, step: 1 }),
+    systemMessage(2, 'sys-1', 1, 1),
+    userMessage(3, 'u-1'),
+    assistantMessage(4, 'a-1', 1, 1),
+    userMessage(5, 'ctx-1', { kind: 'plugin', plugin: 'other-plugin' }),
+    toolResult(6, 't-1', 1, 1, 'call-1'),
+    event(7, 'turn/end', { turn: 1 }),
+  ]
+  // A compaction checkpoint replacing the context row: not this plugin's
+  // placeholder, so the reply window must refuse to shadow it silently.
+  const foreign = event(
+    8,
+    'user/message',
+    { id: 'compact-1', role: 'user', content: [], source: { kind: 'plugin', plugin: 'compact' } },
+    { surfaceOp: { op: 'replace', startSeq: 5, endSeq: 5 }, sourceEventSeqs: [5] },
+  )
+  const withForeign = [...log, foreign]
+  const nodes = foldSurface(withForeign).nodes
+  assert.deepEqual(nodes, [2, 3, 4, 8, 6])
+  assert.throws(() => planRange(withForeign, nodes, { mode: 'reply', seq: 4 }), (error) => error instanceof PlanError && error.code === 'range-not-clean')
+})
+
 test('isBusy tracks open turns and compaction brackets', () => {
   const closed = baseLog()
   assert.equal(isBusy(closed), false)

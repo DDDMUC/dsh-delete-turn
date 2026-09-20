@@ -188,6 +188,19 @@ export class PlanError extends Error {
 }
 
 /**
+ * Whether one event is this plugin's own empty deletion placeholder.
+ * Placeholders are no-ops already removed from the context, so a later window
+ * may shadow them again; any other foreign node keeps its veto.
+ * @param event - raw session event.
+ * @returns true for a user/message produced by this plugin.
+ */
+export function isOwnPlaceholder(event) {
+  const data = event && event.data
+  const source = data && (data.source || (data.message && data.message.source))
+  return Boolean(source && source.kind === 'plugin' && source.plugin === PLUGIN_ID)
+}
+
+/**
  * Turn one UI target into a canonical replacement range.
  *
  * Modes:
@@ -244,6 +257,7 @@ export function planRange(events, surfaceNodes, request) {
   // Surface node 0 is the system prompt head: the official append contract only
   // lets a system/message rewrite exactly that node, and no UI row targets it.
   if (targetSeq === surfaceNodes[0]) throw new PlanError('not-deletable', 'the system prompt head cannot be deleted')
+  if (target.type === 'system/message') throw new PlanError('not-deletable', 'the system prompt cannot be deleted')
 
   if (mode === 'message') {
     if (target.type !== 'user/message') {
@@ -264,8 +278,7 @@ export function planRange(events, surfaceNodes, request) {
   if (mode === 'step') {
     if (target.type !== 'assistant/message' && target.type !== 'tool/result') {
       throw new PlanError('not-deletable', 'step deletion requires an assistant message or a tool result')
-    }
-    const turn = target.data && target.data.turn
+    }    const turn = target.data && target.data.turn
     const step = target.data && target.data.step
     if (typeof turn !== 'number' || typeof step !== 'number') {
       throw new PlanError('not-deletable', 'step deletion requires a closed step')
@@ -288,7 +301,7 @@ export function planRange(events, surfaceNodes, request) {
     const startIdx = Math.min(...indexes)
     const endIdx = Math.max(...indexes)
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
-    if (shadowed.some((seq) => !memberSet.has(seq))) {
+    if (shadowed.some((seq) => !memberSet.has(seq) && !isOwnPlaceholder(bySeq.get(seq)))) {
       throw new PlanError('range-not-clean', 'the step window contains unrelated surface nodes')
     }
     return {
@@ -319,6 +332,10 @@ export function planRange(events, surfaceNodes, request) {
       if (index <= lastHumanIdx) continue
       const event = bySeq.get(seq)
       if (!event) continue
+      // The system prompt head is appended inside the first step, so its
+      // enclosing turn is that turn; it is never reply content and must never
+      // anchor a reply window.
+      if (event.type === 'system/message') continue
       const eventTurn =
         event.data && typeof event.data.turn === 'number' ? event.data.turn : turnOf.get(seq)
       if (eventTurn !== turn) continue
@@ -329,7 +346,7 @@ export function planRange(events, surfaceNodes, request) {
     const startIdx = nodeIndex.get(members[0])
     const endIdx = nodeIndex.get(members[members.length - 1])
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
-    if (shadowed.some((seq) => !memberSet.has(seq))) {
+    if (shadowed.some((seq) => !memberSet.has(seq) && !isOwnPlaceholder(bySeq.get(seq)))) {
       throw new PlanError('range-not-clean', 'the reply window contains unrelated surface nodes')
     }
     const closing = bySeq.get(members[members.length - 1])
