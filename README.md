@@ -9,7 +9,7 @@
 ## 中文
 
 <div align="center">
-  <img src="docs/screenshots/01-row-action.png" alt="用户消息行上的删除按钮" width="820" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/01-row-action.png" alt="用户消息行上的删除按钮" width="820" />
   <br>
   <sub>▲ 悬停消息行时出现的删除按钮（复制按钮右侧）</sub>
 </div>
@@ -37,11 +37,11 @@ DSH 的会话日志是 append-only 的：说错话、发错提示词、模型答
 ### 截图
 
 <div align="center">
-  <img src="docs/screenshots/02-confirm.png" alt="删除确认弹窗" width="560" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/02-confirm.png" alt="删除确认弹窗" width="560" />
   <br>
   <sub>▲ 删除前确认：说明影响范围，原始日志不改写</sub>
   <br><br>
-  <img src="docs/screenshots/03-after-delete.png" alt="删除后该行消失" width="820" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/03-after-delete.png" alt="删除后该行消失" width="820" />
   <br>
   <sub>▲ 删除后：该行从转录中消失，后续内容自然上移</sub>
 </div>
@@ -118,7 +118,7 @@ MIT
 ## English
 
 <div align="center">
-  <img src="docs/screenshots/01-row-action.png" alt="Delete action on a user message row" width="820" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/01-row-action.png" alt="Delete action on a user message row" width="820" />
   <br>
   <sub>▲ The delete action appears when a message row is hovered</sub>
 </div>
@@ -146,11 +146,11 @@ This plugin puts deletion back on the message itself:
 ### Screenshots
 
 <div align="center">
-  <img src="docs/screenshots/02-confirm.png" alt="Delete confirmation dialog" width="560" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/02-confirm.png" alt="Delete confirmation dialog" width="560" />
   <br>
   <sub>▲ Confirmation states the exact scope; the log is never rewritten</sub>
   <br><br>
-  <img src="docs/screenshots/03-after-delete.png" alt="The row is gone after deletion" width="820" />
+  <img src="https://raw.githubusercontent.com/DDDMUC/dsh-delete-turn/main/docs/screenshots/03-after-delete.png" alt="The row is gone after deletion" width="820" />
   <br>
   <sub>▲ After deletion the row is gone from the transcript</sub>
 </div>
