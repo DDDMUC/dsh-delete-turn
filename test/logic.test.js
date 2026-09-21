@@ -65,7 +65,7 @@ function deletionReplacement(seq, shadowed) {
     {
       id: `del-${seq}`,
       role: 'user',
-      content: [],
+      content: [{ type: 'text', text: '[deleted]' }],
       source: { kind: 'plugin', plugin: PLUGIN_ID },
     },
     { surfaceOp: { op: 'replace', startSeq: shadowed[0], endSeq: shadowed[shadowed.length - 1] }, sourceEventSeqs: shadowed },
@@ -117,7 +117,7 @@ test('hiddenEntries infers the deletion mode and ignores foreign producers', () 
     {
       id: 'compact-1',
       role: 'user',
-      content: [],
+      content: [{ type: 'text', text: 'compacted' }],
       source: { kind: 'plugin', plugin: 'compact' },
     },
     { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 4 }, sourceEventSeqs: [4] },
@@ -223,7 +223,7 @@ test('a foreign node inside the window still refuses the plan', () => {
   const foreign = event(
     8,
     'user/message',
-    { id: 'compact-1', role: 'user', content: [], source: { kind: 'plugin', plugin: 'compact' } },
+    { id: 'compact-1', role: 'user', content: [{ type: 'text', text: 'compacted' }], source: { kind: 'plugin', plugin: 'compact' } },
     { surfaceOp: { op: 'replace', startSeq: 5, endSeq: 5 }, sourceEventSeqs: [5] },
   )
   const withForeign = [...log, foreign]
@@ -242,7 +242,7 @@ test('deletableReplyTurns skips turns with no reply content left', () => {
   const compaction = event(
     15,
     'user/message',
-    { id: 'compact-1', role: 'user', content: [], source: { kind: 'plugin', plugin: 'compact' } },
+    { id: 'compact-1', role: 'user', content: [{ type: 'text', text: 'compacted' }], source: { kind: 'plugin', plugin: 'compact' } },
     { surfaceOp: { op: 'replace', startSeq: 3, endSeq: 8 }, sourceEventSeqs: [3, 4, 5, 6, 7, 8] },
   )
   const compacted = [...log, compaction]
