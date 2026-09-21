@@ -78,7 +78,7 @@ UI（官方槽按钮 / DOM 增强按钮）
   sessionQuery.readSession() 读完整日志（live 优先）
   自实现 surface fold → 当前 surface 节点 + 历史替换遮蔽集
   校验（当前节点 / 区间干净 / 回合已闭合 / 不碰系统头）
-  session.append('user/message', 空内容占位, {
+  session.append('user/message', 短标记占位, {
     surfaceOp: { op: 'replace', startSeq, endSeq },
     sourceEventSeqs: [被遮蔽的全部 seq],
   })
@@ -91,7 +91,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 设计要点：
 
-- **为什么用空的 `user/message` 占位**：官方格式校验把 `system/message` 钉在「打开中的 step」上（不能用于回合外的删除），而 `assistant/message` 禁止携带 `sourceEventSeqs`（无法声明被遮蔽节点）。压缩检查点用的正是 `user/message` 替换；空内容占位不会给模型留下任何可读文本（实测后续请求正常）。
+- **为什么占位是短标记而不是空内容**：官方格式校验把 `system/message` 钉在「打开中的 step」上（不能用于回合外的删除），而 `assistant/message` 禁止携带 `sourceEventSeqs`（无法声明被遮蔽节点）。压缩检查点用的正是 `user/message` 替换；占位必须带一小段文本（`[deleted]`），因为严格网关会拒绝空内容的 user 消息（`user message must have content`），而标记文本不会重放被删除的内容。
 - **为什么不读 React fiber / CSS 哈希类名**：行定位只用官方 `data-chat-flow-*` 锚点与官方 `useChat` 标准 hook，宿主 UI 重构不会静默失效。
 - **为什么刷新后仍然隐藏**：隐藏台账不是浏览器本地状态，而是日志里替换事件的可重放推导；宿主 `/state` 路由在每次打开会话时重建它。
 
@@ -101,6 +101,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 - 回合进行中不允许删除；请等回复结束后操作。
 - 系统提示词头（surface 节点 0）不可删除。
 - 助手操作条的删除范围是**整条回复**；要只删某一步，请用思考卡 / 工具卡上的按钮。
+- 已经被官方压缩（`/compact`）移出模型上下文的内容不再显示删除入口：它已经不在上下文里，转录用意保留；入口只在内容仍可删时才出现。
 - 宿主侧插件树仅在 DSH 启动时加载：安装、更新插件后必须完全重启 DSH。
 
 ### 兼容性
@@ -187,7 +188,7 @@ Host:
   sessionQuery.readSession() reads the complete log (live-preferred)
   local surface fold → current surface nodes + historical shadowed seqs
   validate (current node / clean window / closed turn / protected head)
-  session.append('user/message', empty placeholder, {
+  session.append('user/message', short marker placeholder, {
     surfaceOp: { op: 'replace', startSeq, endSeq },
     sourceEventSeqs: [every shadowed seq],
   })
@@ -200,7 +201,7 @@ Browser:
 
 Design notes:
 
-- **Why an empty `user/message` placeholder**: the official format validation pins `system/message` to an open step (unusable for an out-of-band delete) and forbids `sourceEventSeqs` on `assistant/message` (so it cannot cite shadowed nodes). Compaction checkpoints use `user/message` replacements; an empty content array leaves no readable text for the model (verified with follow-up requests).
+- **Why the placeholder is a short marker, not empty content**: the official format validation pins `system/message` to an open step (unusable for an out-of-band delete) and forbids `sourceEventSeqs` on `assistant/message` (so it cannot cite shadowed nodes). Compaction checkpoints use `user/message` replacements; the placeholder must carry a short text (`[deleted]`) because strict gateways reject a user message with no content (`user message must have content`), and the marker never replays what was removed.
 - **Why no React fiber or CSS-module hashing**: rows are addressed through official `data-chat-flow-*` anchors and the official `useChat` standard hook, so a host UI refactor cannot silently detach the actions.
 - **Why a reload stays hidden**: the ledger is not browser state; it is a replay of the replacement events in the log, rebuilt by the host `/state` route.
 
@@ -210,6 +211,7 @@ Design notes:
 - A running turn cannot be deleted; wait for it to settle.
 - The system-prompt head (surface node 0) is protected.
 - The assistant action strip deletes the whole reply attempt; use the reasoning/tool card to remove a single step.
+- Content already removed from the model context by official compaction (`/compact`) no longer offers a delete action: it is not in the context any more and the transcript keeps it on purpose.
 - The host plugin tree loads at DSH startup only: fully restart DSH after installing or updating the plugin.
 
 ### Compatibility

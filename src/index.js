@@ -18,7 +18,7 @@
 // the plugin loads on any profile and degrades to a clear HTTP failure when a
 // service is absent.
 import { randomUUID } from 'node:crypto'
-import { PLUGIN_ID, PlanError, hiddenEntries, isBusy, foldSurface, planRange } from './logic.js'
+import { PLUGIN_ID, PlanError, deletableReplyTurns, foldSurface, hiddenEntriesOfFold, isBusy, planRange } from './logic.js'
 
 export const name = PLUGIN_ID
 
@@ -144,8 +144,14 @@ async function flushSession(ctx, session) {
 async function stateOf(ctx, sessionId) {
   const events = await readEvents(ctx, sessionId)
   if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
+  const folded = foldSurface(events)
   return {
-    hidden: hiddenEntries(events),
+    hidden: hiddenEntriesOfFold(folded, events),
+    // The current surface lets the browser half tell a row that still has
+    // context content from one whose content a compaction already removed;
+    // `replyTurns` narrows that to turns with an actually deletable reply.
+    surface: folded.nodes,
+    replyTurns: deletableReplyTurns(events, folded.nodes),
     live: Boolean(findLiveSession(ctx, sessionId)),
     busy: isBusy(events),
     lastSeq: events.length > 0 ? events[events.length - 1].seq : -1,
@@ -192,14 +198,16 @@ async function deleteTarget(ctx, sessionId, body) {
     // validation pins system/message to an open step (so it cannot carry an
     // out-of-band deletion) and forbids sourceEventSeqs on assistant/message
     // (so it cannot cite the shadowed nodes). A compaction checkpoint is the
-    // same shape; an empty content array keeps the placeholder message from
-    // carrying any model-visible text.
+    // same shape. The carrier text is a short marker rather than an empty
+    // array: strict gateways reject a user message with no content
+    // ("user message must have content"), while a marker keeps the deleted
+    // span's position legible without replaying what was removed.
     replacement = session.append(
       'user/message',
       {
         id: randomUUID(),
         role: 'user',
-        content: [],
+        content: [{ type: 'text', text: '[deleted]' }],
         source: { kind: 'plugin', plugin: PLUGIN_ID },
       },
       {

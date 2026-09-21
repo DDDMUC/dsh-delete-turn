@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   PLUGIN_ID,
   PlanError,
+  deletableReplyTurns,
   foldSurface,
   hiddenEntries,
   isBusy,
@@ -229,6 +230,33 @@ test('a foreign node inside the window still refuses the plan', () => {
   const nodes = foldSurface(withForeign).nodes
   assert.deepEqual(nodes, [2, 3, 4, 8, 6])
   assert.throws(() => planRange(withForeign, nodes, { mode: 'reply', seq: 4 }), (error) => error instanceof PlanError && error.code === 'range-not-clean')
+})
+
+test('deletableReplyTurns skips turns with no reply content left', () => {
+  const log = baseLog()
+  const nodes = foldSurface(log).nodes
+  assert.deepEqual(deletableReplyTurns(log, nodes), [1, 2])
+
+  // A compaction checkpoint over the whole first turn leaves its transcript
+  // rows in place but removes every deletable node from the surface.
+  const compaction = event(
+    15,
+    'user/message',
+    { id: 'compact-1', role: 'user', content: [], source: { kind: 'plugin', plugin: 'compact' } },
+    { surfaceOp: { op: 'replace', startSeq: 3, endSeq: 8 }, sourceEventSeqs: [3, 4, 5, 6, 7, 8] },
+  )
+  const compacted = [...log, compaction]
+  assert.deepEqual(deletableReplyTurns(compacted, foldSurface(compacted).nodes), [2])
+
+  // A turn holding only the human prompt has nothing to delete either.
+  const promptOnly = [
+    event(0, 'turn/start', { turn: 1 }),
+    event(1, 'step/start', { turn: 1, step: 1 }),
+    systemMessage(2, 'sys-1', 1, 1),
+    userMessage(3, 'u-1'),
+    event(4, 'turn/end', { turn: 1 }),
+  ]
+  assert.deepEqual(deletableReplyTurns(promptOnly, foldSurface(promptOnly).nodes), [])
 })
 
 test('isBusy tracks open turns and compaction brackets', () => {

@@ -108,6 +108,7 @@ window.__ModuleLoader__.load({
       '[data-variant="think"]:hover .dshdt-think-action,.dshdt-think-action:focus-within{opacity:1}',
       '.dshdt-collapsing{overflow:hidden;transition:height .2s ease,opacity .14s ease,margin .2s ease,padding .2s ease}',
       '[data-dshdt-hidden="1"]{display:none!important}',
+      '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
       '.dshdt-dialog-text{margin:0;color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:22px}',
       '.dshdt-dialog-note{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
       '.dshdt-dialog-error{margin:10px 0 0;color:var(--dsw-alias-state-error-primary,#d54941);font-size:13px;line-height:20px}',
@@ -165,6 +166,9 @@ window.__ModuleLoader__.load({
         this.animateOnce = false
         this.view = Object.freeze({
           hidden: new Map(),
+          surface: new Set(),
+          replyTurns: new Set(),
+          surfaceReady: false,
           loaded: false,
           loadError: false,
           dialog: null,
@@ -212,7 +216,11 @@ window.__ModuleLoader__.load({
             for (const item of Array.isArray(data.hidden) ? data.hidden : []) {
               if (item && typeof item.seq === 'number') hidden.set(item.seq, typeof item.mode === 'string' ? item.mode : 'message')
             }
-            this.publish({ hidden, loaded: true, loadError: false })
+            const surface = new Set()
+            for (const seq of Array.isArray(data.surface) ? data.surface : []) surface.add(seq)
+            const replyTurns = new Set()
+            for (const turn of Array.isArray(data.replyTurns) ? data.replyTurns : []) replyTurns.add(turn)
+            this.publish({ hidden, surface, replyTurns, surfaceReady: true, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -468,6 +476,24 @@ window.__ModuleLoader__.load({
       if (host.parentElement !== think) think.appendChild(host)
     }
 
+    // A row may only offer an action while its content still exists in the
+    // model context: compaction (or another producer) can remove a turn from
+    // the surface while its transcript row stays visible on purpose.
+    function rowDeletable(node, seqs, view) {
+      if (!view.surfaceReady) return true
+      const data = node.data || {}
+      if (node.kind === 'turn-tail' || node.kind === 'turn-process' || node.kind === 'turn-error' || node.kind === 'model-retry') {
+        if (typeof data.turn === 'number') return view.replyTurns.has(data.turn)
+      }
+      return seqs.some((seq) => view.surface.has(seq))
+    }
+
+    function slotCoversRow(node) {
+      if (node.kind !== 'turn-tail') return false
+      const closing = node.data && node.data.closing
+      return Boolean(closing && closing.finalNode && closing.finalNode.messageId !== undefined)
+    }
+
     function applyDom(snapshot, view, controller, t) {
       if (!snapshot || !snapshot.nodes || typeof snapshot.nodes.get !== 'function') return
       const animate = controller.consumeAnimate()
@@ -482,15 +508,20 @@ window.__ModuleLoader__.load({
         const hidden = isRowHidden(view.hidden, seqs)
         setRowHidden(row, hidden, animate)
         const target = hidden ? null : targetFor(node)
-        if (target === null) removeRowAction(row)
-        else injectRowAction(row, node, target, controller, t)
+        const covered = target !== null || slotCoversRow(node)
+        const deletable = !hidden && covered && rowDeletable(node, seqs, view)
+        if (deletable && target !== null) injectRowAction(row, node, target, controller, t)
+        else removeRowAction(row)
+        if (!hidden && covered && !rowDeletable(node, seqs, view)) row.dataset.dshdtNoTarget = '1'
+        else delete row.dataset.dshdtNoTarget
       }
       for (const think of document.querySelectorAll('[data-variant="think"]')) {
         const row = think.closest('[data-chat-flow-key]')
         const node = row ? snapshot.nodes.get(row.getAttribute('data-chat-flow-key')) : undefined
         const final = node && node.kind === 'assistant-step' ? node.data.finalNode : undefined
         const seq = final && typeof final.seq === 'number' ? final.seq : undefined
-        if (seq === undefined || view.hidden.has(seq)) removeThinkAction(think)
+        const allowed = seq !== undefined && !view.hidden.has(seq) && (!view.surfaceReady || view.surface.has(seq))
+        if (!allowed) removeThinkAction(think)
         else injectThinkAction(think, { mode: 'step', seq, label: 'step' }, controller, t)
       }
     }

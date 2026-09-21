@@ -90,10 +90,19 @@ export function messageIdOf(event) {
  * @returns one entry per hidden seq: `{ seq, mode, replacement }`.
  */
 export function hiddenEntries(events) {
-  const { replacements } = foldSurface(events)
+  return hiddenEntriesOfFold(foldSurface(events), events)
+}
+
+/**
+ * Rebuild the deletion ledger from an existing fold result.
+ * @param folded - result of {@link foldSurface}.
+ * @param events - the same log the fold was computed from.
+ * @returns one entry per hidden seq: `{ seq, mode, replacement }`.
+ */
+export function hiddenEntriesOfFold(folded, events) {
   const bySeq = new Map(events.map((event) => [event.seq, event]))
   const out = []
-  for (const replacement of replacements) {
+  for (const replacement of folded.replacements) {
     const event = bySeq.get(replacement.seq)
     const data = event && event.data
     const source = data && (data.source || (data.message && data.message.source))
@@ -102,6 +111,46 @@ export function hiddenEntries(events) {
     for (const seq of replacement.shadowed) out.push({ seq, mode, replacement: replacement.seq })
   }
   return out
+}
+
+/**
+ * Turns whose reply window still holds deletable surface content.
+ *
+ * The transcript keeps rows whose content left the model context through a
+ * compaction (that is the whole point of compaction), so the browser half must
+ * not offer a delete action on them. This mirrors the member scan of
+ * {@link planRange}'s reply mode without its cleanliness validation; the host
+ * remains authoritative when a delete actually lands.
+ *
+ * @param events - complete contiguous raw event log.
+ * @param surfaceNodes - current surface seqs in model order.
+ * @returns turn numbers with at least one non-prompt surface node after the
+ *   turn's last human prompt.
+ */
+export function deletableReplyTurns(events, surfaceNodes) {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const turnOf = turnIndex(events)
+  const lastHuman = new Map()
+  const members = new Map()
+  surfaceNodes.forEach((seq, index) => {
+    const event = bySeq.get(seq)
+    if (!event || event.type === 'system/message') return
+    const turn = event.data && typeof event.data.turn === 'number' ? event.data.turn : turnOf.get(seq)
+    if (typeof turn !== 'number') return
+    if (event.type === 'user/message' && event.data && event.data.source && event.data.source.kind === 'user') {
+      lastHuman.set(turn, index)
+      return
+    }
+    const list = members.get(turn) ?? []
+    list.push(index)
+    members.set(turn, list)
+  })
+  const out = []
+  for (const [turn, indexes] of members) {
+    const last = lastHuman.get(turn)
+    if (last === undefined || indexes.some((index) => index > last)) out.push(turn)
+  }
+  return out.sort((a, b) => a - b)
 }
 
 /**
