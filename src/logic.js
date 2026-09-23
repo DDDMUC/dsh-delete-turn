@@ -77,10 +77,28 @@ export function messageIdOf(event) {
 }
 
 /**
+ * Whether one message source belongs to this plugin.
+ *
+ * DSH 0.1.7 migrated stored logs to session format v4, whose canonicalization
+ * flattens plugin sources: `{ kind: 'plugin', plugin: X }` becomes
+ * `{ kind: 'plugin:X' }`. Both shapes must be recognized, because a session
+ * keeps its on-disk v3 log until it is opened, and reads after that return the
+ * canonical v4 shape.
+ * @param source - message source object from a log event.
+ * @returns true when the source names this plugin.
+ */
+export function sourceOwnsPlugin(source) {
+  if (!source || typeof source !== 'object') return false
+  if (source.kind === 'plugin' && source.plugin === PLUGIN_ID) return true
+  return source.kind === `plugin:${PLUGIN_ID}`
+}
+
+/**
  * Rebuild this plugin's deletion ledger from the log alone.
  *
  * Every deletion is one replacement event whose message source is
- * `{ kind: 'plugin', plugin: 'dsh-delete-turn' }`. The mode is inferred from
+ * `{ kind: 'plugin', plugin: 'dsh-delete-turn' }` (v3) or
+ * `{ kind: 'plugin:dsh-delete-turn' }` (v4). The mode is inferred from
  * the shadowed window: one user message is a single-message delete, one step's
  * assistant/tool nodes are a step delete, anything wider is a reply delete.
  * A replacement landed by any other producer — compaction, for instance — is
@@ -106,7 +124,7 @@ export function hiddenEntriesOfFold(folded, events) {
     const event = bySeq.get(replacement.seq)
     const data = event && event.data
     const source = data && (data.source || (data.message && data.message.source))
-    if (!source || source.kind !== 'plugin' || source.plugin !== PLUGIN_ID) continue
+    if (!sourceOwnsPlugin(source)) continue
     const mode = inferMode(bySeq, replacement.shadowed)
     for (const seq of replacement.shadowed) out.push({ seq, mode, replacement: replacement.seq })
   }
@@ -246,7 +264,7 @@ export class PlanError extends Error {
 export function isOwnPlaceholder(event) {
   const data = event && event.data
   const source = data && (data.source || (data.message && data.message.source))
-  return Boolean(source && source.kind === 'plugin' && source.plugin === PLUGIN_ID)
+  return sourceOwnsPlugin(source)
 }
 
 /**

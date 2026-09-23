@@ -9,6 +9,7 @@ import {
   isBusy,
   messageIdOf,
   planRange,
+  sourceOwnsPlugin,
 } from '../src/logic.js'
 
 let clock = 0
@@ -58,7 +59,7 @@ function systemMessage(seq, id, turn, step) {
   )
 }
 
-function deletionReplacement(seq, shadowed) {
+function deletionReplacement(seq, shadowed, source = { kind: 'plugin', plugin: PLUGIN_ID }) {
   return event(
     seq,
     'user/message',
@@ -66,11 +67,14 @@ function deletionReplacement(seq, shadowed) {
       id: `del-${seq}`,
       role: 'user',
       content: [{ type: 'text', text: '[deleted]' }],
-      source: { kind: 'plugin', plugin: PLUGIN_ID },
+      source,
     },
     { surfaceOp: { op: 'replace', startSeq: shadowed[0], endSeq: shadowed[shadowed.length - 1] }, sourceEventSeqs: shadowed },
   )
 }
+
+// Session format v4 canonicalization flattens plugin sources to `plugin:<name>`.
+const V4_SOURCE = { kind: `plugin:${PLUGIN_ID}` }
 
 function baseLog() {
   clock = 0
@@ -200,7 +204,7 @@ test('a reply window may shadow this plugin own placeholders', () => {
     toolResult(6, 't-1', 1, 1, 'call-1'),
     event(7, 'turn/end', { turn: 1 }),
   ]
-  const withPlaceholder = [...log, deletionReplacement(8, [5], 'message')]
+  const withPlaceholder = [...log, deletionReplacement(8, [5])]
   const nodes = foldSurface(withPlaceholder).nodes
   assert.deepEqual(nodes, [2, 3, 4, 8, 6])
   const plan = planRange(withPlaceholder, nodes, { mode: 'reply', seq: 4 })
@@ -257,6 +261,24 @@ test('deletableReplyTurns skips turns with no reply content left', () => {
     event(4, 'turn/end', { turn: 1 }),
   ]
   assert.deepEqual(deletableReplyTurns(promptOnly, foldSurface(promptOnly).nodes), [])
+})
+
+test('the ledger recognizes the v4 flattened plugin source', () => {
+  assert.equal(sourceOwnsPlugin({ kind: 'plugin', plugin: PLUGIN_ID }), true)
+  assert.equal(sourceOwnsPlugin({ kind: `plugin:${PLUGIN_ID}` }), true)
+  assert.equal(sourceOwnsPlugin({ kind: 'plugin', plugin: 'somebody-else' }), false)
+  assert.equal(sourceOwnsPlugin({ kind: 'plugin:somebody-else' }), false)
+
+  const log = [...baseLog(), deletionReplacement(15, [4], V4_SOURCE)]
+  assert.deepEqual(hiddenEntries(log), [{ seq: 4, mode: 'message', replacement: 15 }])
+
+  // A window may shadow an own placeholder in either source shape: the carrier
+  // sits between the injected context (5) and the reply nodes (7, 8).
+  const withPlaceholder = [...baseLog(), deletionReplacement(15, [6], V4_SOURCE)]
+  const placeholderNodes = foldSurface(withPlaceholder).nodes
+  assert.deepEqual(placeholderNodes, [3, 4, 5, 15, 7, 8, 12, 13])
+  const plan = planRange(withPlaceholder, placeholderNodes, { mode: 'reply', seq: 8 })
+  assert.deepEqual(plan.shadowed, [5, 15, 7, 8])
 })
 
 test('isBusy tracks open turns and compaction brackets', () => {

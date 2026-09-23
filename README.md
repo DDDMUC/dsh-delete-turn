@@ -106,7 +106,8 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 ### 兼容性
 
-- 实测 DSH `0.1.6-alpha.2`（web profile，Safari / WebKit 与 Chromium 内核均验证）。
+- 实测 DSH `0.1.6-alpha.2` 与 `0.1.7-alpha.2`（web profile，Safari / WebKit 与 Chromium 内核均验证）。
+- 会话格式 v3 与 v4 都支持：v4 迁移会把插件 source 展平为 `plugin:dsh-delete-turn`，隐藏台账会同时识别 `{ kind: 'plugin', plugin: ... }` 与 `{ kind: 'plugin:...' }` 两代形状。
 - 宿主半区零运行时依赖，全部服务经 cordis ctx 解析；缺少 `sessionQuery` 时回退到 live 会话快照。
 - 不修改 DSH 官方源码，不写任何私有事件类型。
 
@@ -216,7 +217,8 @@ Design notes:
 
 ### Compatibility
 
-- Verified against DSH `0.1.6-alpha.2` (web profile; WebKit and Chromium engines).
+- Verified against DSH `0.1.6-alpha.2` and `0.1.7-alpha.2` (web profile; WebKit and Chromium engines).
+- Both session formats v3 and v4 are supported: the v4 migration flattens plugin sources to `plugin:dsh-delete-turn`, and the hidden ledger recognizes both `{ kind: 'plugin', plugin: ... }` and `{ kind: 'plugin:...' }` shapes.
 - The host half has zero runtime dependencies and resolves every service through the cordis context; it falls back to the live session snapshot when `sessionQuery` is absent.
 - No DSH source is modified and no private event type is written.
 
