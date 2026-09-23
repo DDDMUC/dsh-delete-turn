@@ -208,7 +208,8 @@ async function deleteTarget(ctx, sessionId, body) {
         id: randomUUID(),
         role: 'user',
         content: [{ type: 'text', text: '[deleted]' }],
-        source: { kind: 'plugin', plugin: PLUGIN_ID },
+        // v4 format: plugin wrappers are retired; the producer kind carries the id.
+        source: { kind: `plugin:${PLUGIN_ID}` },
       },
       {
         surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
