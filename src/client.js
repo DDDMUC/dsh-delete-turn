@@ -32,6 +32,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'dsh-delete-turn'
     const ROUTE_PREFIX = '/dsh-delete-turn'
+    // Minimum gap between automatic snapshot refreshes while a transcript grows.
+    const REFRESH_INTERVAL_MS = 3000
 
     // --- copy -----------------------------------------------------------------
 
@@ -169,6 +171,7 @@ window.__ModuleLoader__.load({
           surface: new Set(),
           replyTurns: new Set(),
           surfaceReady: false,
+          surfaceThrough: -1,
           loaded: false,
           loadError: false,
           dialog: null,
@@ -204,9 +207,20 @@ window.__ModuleLoader__.load({
         return value
       }
 
+      // Refresh the snapshot when the transcript shows events newer than the
+      // last read. Throttled: a streaming turn produces many new seqs, and one
+      // read per interval is enough for the ledger and the gates.
+      requestRefresh() {
+        if (this.inflight !== null) return
+        const since = typeof this.refreshedAt === 'number' ? Date.now() - this.refreshedAt : Infinity
+        if (since < REFRESH_INTERVAL_MS) return
+        this.load(true)
+      }
+
       load(force) {
         if (this.inflight !== null) return this.inflight
         if (this.view.loaded && force !== true) return Promise.resolve()
+        this.refreshedAt = Date.now()
         const url = `${ROUTE_PREFIX}/state?sessionId=${encodeURIComponent(this.sessionId)}`
         const pending = fetch(url, { headers: { accept: 'application/json' } })
           .then(async (res) => {
@@ -220,7 +234,8 @@ window.__ModuleLoader__.load({
             for (const seq of Array.isArray(data.surface) ? data.surface : []) surface.add(seq)
             const replyTurns = new Set()
             for (const turn of Array.isArray(data.replyTurns) ? data.replyTurns : []) replyTurns.add(turn)
-            this.publish({ hidden, surface, replyTurns, surfaceReady: true, loaded: true, loadError: false })
+            const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
+            this.publish({ hidden, surface, replyTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -291,7 +306,10 @@ window.__ModuleLoader__.load({
           const seq = root && typeof root.seq === 'number' ? root.seq : undefined
           return seq === undefined ? null : { mode: 'step', seq, label: 'step' }
         }
-        case 'turn-process':
+        // The process/disclosure row ("已思考", "用时 N 秒") deliberately gets no
+        // entry: the same whole-reply delete already lives in the turn tail's
+        // official action strip, so a second hover-only icon there would only
+        // duplicate the same scope.
         case 'turn-error':
         case 'model-retry':
           return typeof data.turn === 'number' ? { mode: 'reply', turn: data.turn, label: 'reply' } : null
@@ -479,9 +497,17 @@ window.__ModuleLoader__.load({
     // A row may only offer an action while its content still exists in the
     // model context: compaction (or another producer) can remove a turn from
     // the surface while its transcript row stays visible on purpose.
+    //
+    // The state snapshot describes the session as of `surfaceThrough`. Rows
+    // appended after that point (a message just sent in this session, before
+    // the snapshot is refreshed) are NOT "missing from the surface" — they were
+    // never covered by it — so they must stay actionable. The host still
+    // validates every delete.
     function rowDeletable(node, seqs, view) {
       if (!view.surfaceReady) return true
       const data = node.data || {}
+      const beyondSnapshot = (seq) => typeof seq === 'number' && typeof view.surfaceThrough === 'number' && seq > view.surfaceThrough
+      if (seqs.length > 0 && seqs.every(beyondSnapshot)) return true
       if (node.kind === 'turn-tail' || node.kind === 'turn-process' || node.kind === 'turn-error' || node.kind === 'model-retry') {
         if (typeof data.turn === 'number') return view.replyTurns.has(data.turn)
       }
@@ -498,6 +524,7 @@ window.__ModuleLoader__.load({
       if (!snapshot || !snapshot.nodes || typeof snapshot.nodes.get !== 'function') return
       const animate = controller.consumeAnimate()
       const rows = document.querySelectorAll('[data-chat-flow-key]')
+      let maxSeq = -1
       for (const row of rows) {
         if (!(row instanceof HTMLElement)) continue
         const key = row.getAttribute('data-chat-flow-key')
@@ -505,6 +532,7 @@ window.__ModuleLoader__.load({
         const node = snapshot.nodes.get(key)
         if (!node) continue
         const seqs = seqsFor(node)
+        for (const seq of seqs) if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
         const hidden = isRowHidden(view.hidden, seqs)
         setRowHidden(row, hidden, animate)
         const target = hidden ? null : targetFor(node)
@@ -520,10 +548,16 @@ window.__ModuleLoader__.load({
         const node = row ? snapshot.nodes.get(row.getAttribute('data-chat-flow-key')) : undefined
         const final = node && node.kind === 'assistant-step' ? node.data.finalNode : undefined
         const seq = final && typeof final.seq === 'number' ? final.seq : undefined
-        const allowed = seq !== undefined && !view.hidden.has(seq) && (!view.surfaceReady || view.surface.has(seq))
+        if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
+        const beyondSnapshot = typeof seq === 'number' && view.surfaceReady && seq > view.surfaceThrough
+        const allowed = seq !== undefined && !view.hidden.has(seq) && (!view.surfaceReady || view.surface.has(seq) || beyondSnapshot)
         if (!allowed) removeThinkAction(think)
         else injectThinkAction(think, { mode: 'step', seq, label: 'step' }, controller, t)
       }
+      // The state snapshot only covers events up to `surfaceThrough`; once the
+      // transcript shows newer ones (a message just sent/streamed in this
+      // session), refresh it so the ledger and the gates stay current.
+      if (view.surfaceReady && maxSeq > view.surfaceThrough) controller.requestRefresh()
     }
 
     // --- react entries --------------------------------------------------------

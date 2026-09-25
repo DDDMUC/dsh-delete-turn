@@ -1,6 +1,6 @@
 # dsh-delete-turn
 
-**DeepSeek Harness 消息删除插件 —— 把一条消息从模型上下文里真正拿掉，同时从当前转录里隐藏它。** 助手回复挂在官方 `conversation.chat.assistant-actions` 槽位；用户消息、注入上下文、工具调用卡与过程行由 DOM 增强补上入口。确认后经官方 surface-replace 契约追加替换事件：模型后续看到的历史里不再有这条内容，而原始会话日志一个字节都不改写。
+**DeepSeek Harness 消息删除插件 —— 把一条消息从模型上下文里真正拿掉，同时从当前转录里隐藏它。** 助手回复挂在官方 `conversation.chat.assistant-actions` 槽位；用户消息、注入上下文与工具调用卡由 DOM 增强补上入口。确认后经官方 surface-replace 契约追加替换事件：模型后续看到的历史里不再有这条内容，而原始会话日志一个字节都不改写。
 
 [中文](#中文) · [English](#english)
 
@@ -101,6 +101,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 - 回合进行中不允许删除；请等回复结束后操作。
 - 系统提示词头（surface 节点 0）不可删除。
 - 助手操作条的删除范围是**整条回复**；要只删某一步，请用思考卡 / 工具卡上的按钮。
+- 过程行（「已思考」「用时 N 秒」）不单独提供删除入口：它的范围同样是整条回复，与操作条重复，因此只保留操作条那一个。
 - 已经被官方压缩（`/compact`）移出模型上下文的内容不再显示删除入口：它已经不在上下文里，转录用意保留；入口只在内容仍可删时才出现。
 - 宿主侧插件树仅在 DSH 启动时加载：安装、更新插件后必须完全重启 DSH。
 
@@ -212,6 +213,7 @@ Design notes:
 - A running turn cannot be deleted; wait for it to settle.
 - The system-prompt head (surface node 0) is protected.
 - The assistant action strip deletes the whole reply attempt; use the reasoning/tool card to remove a single step.
+- The process/disclosure row (“Thinking”, “N s”) carries no entry of its own: its scope is the whole reply, which the action strip already covers, so the duplicate was removed.
 - Content already removed from the model context by official compaction (`/compact`) no longer offers a delete action: it is not in the context any more and the transcript keeps it on purpose.
 - The host plugin tree loads at DSH startup only: fully restart DSH after installing or updating the plugin.
 
