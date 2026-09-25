@@ -1,6 +1,6 @@
 {
   "name": "dsh-delete-turn",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Per-message delete for DeepSeek Harness: remove a user message, one reply step, or a whole assistant reply from the derived model context through the official surface-replace contract, and hide it from the visible transcript without rewriting the append-only log.",
   "type": "module",
   "main": "src/index.js",
