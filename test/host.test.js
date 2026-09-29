@@ -85,7 +85,7 @@ function fakeRes() {
   }
 }
 
-test('the delete route appends a non-empty marker carrier', async () => {
+test('the delete route appends a silent zero-width carrier', async () => {
   const events = buildEvents()
   const { ctx, calls } = harness(events)
   apply(ctx)
@@ -100,8 +100,10 @@ test('the delete route appends a non-empty marker carrier', async () => {
   assert.equal(payload.ok, true)
   assert.deepEqual(payload.hidden, [{ seq: 3, mode: 'message' }])
   assert.equal(calls.appended.type, 'user/message')
-  assert.deepEqual(calls.appended.data.content, [{ type: 'text', text: '[deleted]' }])
-  assert.equal(calls.appended.data.content.length > 0, true)
+  // The empty array is schema-valid but the request gateway rejects it
+  // ("user message must have content"); a zero-width space is non-empty for
+  // every validator and carries no readable text for the model.
+  assert.deepEqual(calls.appended.data.content, [{ type: 'text', text: '\u200b' }])
   assert.deepEqual(calls.appended.intent.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
   assert.deepEqual(calls.appended.intent.sourceEventSeqs, [3])
 })

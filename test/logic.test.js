@@ -3,6 +3,7 @@ import test from 'node:test'
 import {
   PLUGIN_ID,
   PlanError,
+  contentEditPairs,
   deletableReplyTurns,
   foldSurface,
   hiddenEntries,
@@ -66,7 +67,7 @@ function deletionReplacement(seq, shadowed, source = { kind: 'plugin', plugin: P
     {
       id: `del-${seq}`,
       role: 'user',
-      content: [{ type: 'text', text: '[deleted]' }],
+      content: [{ type: 'text', text: '\u200b' }],
       source,
     },
     { surfaceOp: { op: 'replace', startSeq: shadowed[0], endSeq: shadowed[shadowed.length - 1] }, sourceEventSeqs: shadowed },
@@ -296,4 +297,61 @@ test('messageIdOf reads each surface event shape', () => {
   assert.equal(messageIdOf(log[6]), 'a-1')
   assert.equal(messageIdOf(log[7]), 't-1')
   assert.equal(messageIdOf(log[3]), 'sys-1')
+})
+
+test('contentEditPairs exposes an in-place message rewrite', () => {
+  const edit = event(
+    15,
+    'user/message',
+    {
+      id: 'u-1-edited',
+      role: 'user',
+      content: [{ type: 'text', text: 'u-1 (edited)' }],
+      source: { kind: 'plugin:dsh-edit-turn', editedBy: 'dsh-edit-turn' },
+    },
+    { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 4 }, sourceEventSeqs: [4] },
+  )
+  const log = [...baseLog(), edit]
+  const folded = foldSurface(log)
+  assert.deepEqual(folded.nodes, [3, 15, 5, 6, 7, 8, 12, 13])
+  assert.deepEqual(contentEditPairs(folded, log), [[4, 15]])
+
+  // Chains compose: a second edit of the replacement yields its own pair.
+  const again = event(
+    20,
+    'user/message',
+    {
+      id: 'u-1-edited-again',
+      role: 'user',
+      content: [{ type: 'text', text: 'u-1 (edited twice)' }],
+      source: { kind: 'plugin:dsh-edit-turn', editedBy: 'dsh-edit-turn' },
+    },
+    { surfaceOp: { op: 'replace', startSeq: 15, endSeq: 15 }, sourceEventSeqs: [15] },
+  )
+  const twice = [...log, again]
+  assert.deepEqual(contentEditPairs(foldSurface(twice), twice), [[4, 15], [15, 20]])
+})
+
+test('contentEditPairs ignores rollbacks, compaction checkpoints and own deletions', () => {
+  const rollback = event(
+    15,
+    'user/message',
+    { id: 'rb', role: 'user', content: [{ type: 'text', text: 'rb' }], source: { kind: 'plugin:dsh-edit-turn' } },
+    { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 13 }, sourceEventSeqs: [4, 5, 6, 7, 8, 12, 13] },
+  )
+  const rollbackLog = [...baseLog(), rollback]
+  assert.deepEqual(contentEditPairs(foldSurface(rollbackLog), rollbackLog), [])
+
+  const compaction = event(
+    15,
+    'user/message',
+    { id: 'cp', role: 'user', content: [{ type: 'text', text: 'summary' }], source: { kind: 'compact-checkpoint' } },
+    { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 4 }, sourceEventSeqs: [4] },
+  )
+  const compactLog = [...baseLog(), compaction]
+  assert.deepEqual(contentEditPairs(foldSurface(compactLog), compactLog), [])
+
+  const own = deletionReplacement(15, [4])
+  const ownLog = [...baseLog(), own]
+  assert.deepEqual(contentEditPairs(foldSurface(ownLog), ownLog), [])
 })

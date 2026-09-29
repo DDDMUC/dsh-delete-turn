@@ -18,7 +18,7 @@
 // the plugin loads on any profile and degrades to a clear HTTP failure when a
 // service is absent.
 import { randomUUID } from 'node:crypto'
-import { PLUGIN_ID, PlanError, deletableReplyTurns, foldSurface, hiddenEntriesOfFold, isBusy, planRange } from './logic.js'
+import { PLUGIN_ID, PlanError, contentEditPairs, deletableReplyTurns, foldSurface, hiddenEntriesOfFold, isBusy, planRange } from './logic.js'
 
 export const name = PLUGIN_ID
 
@@ -145,13 +145,21 @@ async function stateOf(ctx, sessionId) {
   const events = await readEvents(ctx, sessionId)
   if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
   const folded = foldSurface(events)
+  // The live surface is what a delete will actually be validated against, so
+  // expose exactly that when the session is open.
+  const surfaceNodes = surfaceOf(ctx, sessionId, events)
   return {
     hidden: hiddenEntriesOfFold(folded, events),
     // The current surface lets the browser half tell a row that still has
     // context content from one whose content a compaction already removed;
     // `replyTurns` narrows that to turns with an actually deletable reply.
-    surface: folded.nodes,
-    replyTurns: deletableReplyTurns(events, folded.nodes),
+    surface: surfaceNodes,
+    replyTurns: deletableReplyTurns(events, surfaceNodes),
+    // In-place rewrites by other producers (dsh-edit-turn): the transcript row
+    // stays anchored to the original seq while the context holds the
+    // replacement, so the browser half needs the chain to keep the row's
+    // action and to address the live node.
+    edits: contentEditPairs(folded, events),
     live: Boolean(findLiveSession(ctx, sessionId)),
     busy: isBusy(events),
     lastSeq: events.length > 0 ? events[events.length - 1].seq : -1,
@@ -198,16 +206,18 @@ async function deleteTarget(ctx, sessionId, body) {
     // validation pins system/message to an open step (so it cannot carry an
     // out-of-band deletion) and forbids sourceEventSeqs on assistant/message
     // (so it cannot cite the shadowed nodes). A compaction checkpoint is the
-    // same shape. The carrier text is a short marker rather than an empty
-    // array: strict gateways reject a user message with no content
-    // ("user message must have content"), while a marker keeps the deleted
-    // span's position legible without replaying what was removed.
+    // same shape. A user message MUST carry content — an empty content array
+    // is schema-valid but the request gateway answers 400 "user message must
+    // have content" — while a marker like "[deleted]" is read back by the
+    // model. The carrier therefore holds a single ZERO-WIDTH SPACE: non-empty
+    // for every validator, and no readable text for the model, so the deletion
+    // leaves nothing legible in the context.
     replacement = session.append(
       'user/message',
       {
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: '[deleted]' }],
+        content: [{ type: 'text', text: '\u200b' }],
         // v4 format: plugin wrappers are retired; the producer kind carries the id.
         source: { kind: `plugin:${PLUGIN_ID}` },
       },

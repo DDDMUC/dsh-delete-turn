@@ -170,6 +170,7 @@ window.__ModuleLoader__.load({
           hidden: new Map(),
           surface: new Set(),
           replyTurns: new Set(),
+          edits: new Map(),
           surfaceReady: false,
           surfaceThrough: -1,
           loaded: false,
@@ -234,8 +235,12 @@ window.__ModuleLoader__.load({
             for (const seq of Array.isArray(data.surface) ? data.surface : []) surface.add(seq)
             const replyTurns = new Set()
             for (const turn of Array.isArray(data.replyTurns) ? data.replyTurns : []) replyTurns.add(turn)
+            const edits = new Map()
+            for (const pair of Array.isArray(data.edits) ? data.edits : []) {
+              if (Array.isArray(pair) && typeof pair[0] === 'number' && typeof pair[1] === 'number') edits.set(pair[0], pair[1])
+            }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, surface, replyTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, surface, replyTurns, edits, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -258,20 +263,31 @@ window.__ModuleLoader__.load({
       }
 
       async confirm() {
-        const target = this.view.dialog
-        if (target === null || this.view.pending) return
+        const requested = this.view.dialog
+        if (requested === null || this.view.pending) return
         this.publish({ pending: true, failure: null })
         try {
-          const res = await fetch(`${ROUTE_PREFIX}/delete`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ sessionId: this.sessionId, ...target }),
-          })
-          const data = await res.json().catch(() => ({}))
-          if (!res.ok || !data.ok) {
-            this.publish({ pending: false, failure: data && data.code ? String(data.code) : 'generic' })
+          // The live node can move while the dialog sits open: another producer
+          // (dsh-edit-turn) rewrites the message in place, and the replacement
+          // this row pointed at is shadowed by the time we submit. Re-read the
+          // snapshot, aim at the current chain head, and retry once when the
+          // first attempt reports content that has already left the context.
+          await this.load(true)
+          let target = this.resolveTarget(requested)
+          let result = await this.deleteOnce(target)
+          if (!result.ok && result.code === 'already-deleted') {
+            await this.load(true)
+            const next = this.resolveTarget(target)
+            if (next.seq !== target.seq) {
+              target = next
+              result = await this.deleteOnce(next)
+            }
+          }
+          if (!result.ok) {
+            this.publish({ pending: false, failure: result.code })
             return
           }
+          const data = result.data
           const hidden = new Map(this.view.hidden)
           for (const item of Array.isArray(data.hidden) ? data.hidden : []) {
             if (item && typeof item.seq === 'number') hidden.set(item.seq, typeof item.mode === 'string' ? item.mode : target.mode)
@@ -281,6 +297,26 @@ window.__ModuleLoader__.load({
         } catch {
           this.publish({ pending: false, failure: 'generic' })
         }
+      }
+
+      // Map a dialog target onto the current chain head, so a row that another
+      // producer rewrote in place is deleted through its live replacement.
+      resolveTarget(target) {
+        if (!target || typeof target.seq !== 'number' || this.view.edits.size === 0) return target
+        const chain = chainSeqs(target.seq, this.view.edits)
+        const seq = chain[chain.length - 1]
+        return seq === target.seq ? target : { ...target, seq }
+      }
+
+      async deleteOnce(target) {
+        const res = await fetch(`${ROUTE_PREFIX}/delete`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: this.sessionId, ...target }),
+        })
+        const data = await res.json().catch(() => ({}))
+        if (res.ok && data.ok) return { ok: true, data }
+        return { ok: false, code: data && data.code ? String(data.code) : 'generic' }
       }
 
       dispose() {
@@ -361,6 +397,58 @@ window.__ModuleLoader__.load({
           push(node.anchorSeq)
       }
       return out
+    }
+
+    // Process group rows use the composite key `["process", anchorMemberKey,
+    // part]` (ui-chat's ProcessState). The second element names the member node
+    // the group is anchored to, which is the node the group row must follow.
+    function groupAnchorKey(key) {
+      if (!key.startsWith('["process"')) return undefined
+      try {
+        const parsed = JSON.parse(key)
+        if (Array.isArray(parsed) && parsed[0] === 'process' && typeof parsed[1] === 'string') return parsed[1]
+      } catch {
+        // not a composite key
+      }
+      return undefined
+    }
+
+    // Other producers can rewrite a message in place through a replacement
+    // (dsh-edit-turn does this for an edited message). The transcript row then
+    // stays anchored to the original seq while the model context holds the
+    // replacement, so the host exposes `edits: from -> to`. A row is live while
+    // any seq of its chain is on the surface, and an action must address the
+    // chain head.
+    function chainSeqs(seq, edits) {
+      const out = [seq]
+      const seen = new Set([seq])
+      let current = seq
+      for (let hop = 0; hop < 64; hop += 1) {
+        const next = edits.get(current)
+        if (typeof next !== 'number' || seen.has(next)) break
+        out.push(next)
+        seen.add(next)
+        current = next
+      }
+      return out
+    }
+
+    function expandSeqs(seqs, edits) {
+      if (edits.size === 0) return seqs
+      const out = []
+      for (const seq of seqs) {
+        for (const value of chainSeqs(seq, edits)) {
+          if (!out.includes(value)) out.push(value)
+        }
+      }
+      return out
+    }
+
+    function liveTarget(target, edits) {
+      if (!target || typeof target.seq !== 'number' || edits.size === 0) return target
+      const chain = chainSeqs(target.seq, edits)
+      const seq = chain[chain.length - 1]
+      return seq === target.seq ? target : { ...target, seq }
     }
 
     function isRowHidden(hidden, seqs) {
@@ -530,12 +618,24 @@ window.__ModuleLoader__.load({
         const key = row.getAttribute('data-chat-flow-key')
         if (!key) continue
         const node = snapshot.nodes.get(key)
-        if (!node) continue
-        const seqs = seqsFor(node)
+        if (!node) {
+          // Process group rows carry a composite key ("["process", memberKey,
+          // part]") and wrap ordinary member nodes. Hide the group together
+          // with its anchor member, so deleting a turn's content leaves no
+          // process chip behind.
+          const anchorKey = groupAnchorKey(key)
+          const anchor = anchorKey === undefined ? undefined : snapshot.nodes.get(anchorKey)
+          if (anchor !== undefined) {
+            const seqs = expandSeqs(seqsFor(anchor), view.edits)
+            setRowHidden(row, isRowHidden(view.hidden, seqs), animate)
+          }
+          continue
+        }
+        const seqs = expandSeqs(seqsFor(node), view.edits)
         for (const seq of seqs) if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
         const hidden = isRowHidden(view.hidden, seqs)
         setRowHidden(row, hidden, animate)
-        const target = hidden ? null : targetFor(node)
+        const target = hidden ? null : liveTarget(targetFor(node), view.edits)
         const covered = target !== null || slotCoversRow(node)
         const deletable = !hidden && covered && rowDeletable(node, seqs, view)
         if (deletable && target !== null) injectRowAction(row, node, target, controller, t)
@@ -558,6 +658,42 @@ window.__ModuleLoader__.load({
       // transcript shows newer ones (a message just sent/streamed in this
       // session), refresh it so the ledger and the gates stay current.
       if (view.surfaceReady && maxSeq > view.surfaceThrough) controller.requestRefresh()
+      updateTurnNavigation()
+    }
+
+    // The host's turn-navigation rail lists loaded turns by number. A turn
+    // whose rows are all gone (deleted by us, or collapsed by the host itself)
+    // must not keep a jump mark, or an emptied transcript still shows a rail of
+    // entries pointing at nothing. Turns without any loaded row are left alone:
+    // an unmounted window is not an empty one.
+    function updateTurnNavigation() {
+      const marks = document.querySelectorAll('nav button[data-index]')
+      if (marks.length === 0) return
+      const seen = new Map()
+      for (const row of document.querySelectorAll('[data-chat-flow-key][data-chat-turn]')) {
+        const turn = row.getAttribute('data-chat-turn')
+        if (turn === null || turn === '') continue
+        const visible = row.dataset.dshdtHidden !== '1' && row.getBoundingClientRect().height > 0
+        if (seen.get(turn) !== true) seen.set(turn, visible)
+      }
+      let visibleMarks = 0
+      for (const mark of marks) {
+        const label = mark.getAttribute('aria-label') || ''
+        const turn = (label.match(/\d+/) || [])[0]
+        const state = turn === undefined ? undefined : seen.get(turn)
+        const hasContent = state === undefined ? true : state
+        if (hasContent) {
+          delete mark.dataset.dshdtHidden
+          visibleMarks += 1
+        } else {
+          mark.dataset.dshdtHidden = '1'
+        }
+      }
+      const nav = marks[0].closest('nav')
+      if (nav !== null) {
+        if (visibleMarks === 0) nav.dataset.dshdtHidden = '1'
+        else delete nav.dataset.dshdtHidden
+      }
     }
 
     // --- react entries --------------------------------------------------------

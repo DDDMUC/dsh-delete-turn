@@ -190,6 +190,43 @@ export function inferMode(bySeq, shadowed) {
 }
 
 /**
+ * In-place content rewrites landed by other producers.
+ *
+ * The official transcript keeps the original row of a shadowed event and draws
+ * the replacement content in its place (dsh-edit-turn does exactly this for an
+ * edited message), so the browser half needs `from -> to` pairs to keep that
+ * row's actions and to address the live node.
+ *
+ * Only a single-node replacement of the same event type counts as an in-place
+ * rewrite: it is the shape dsh-edit-turn lands when it rewrites one message in
+ * place, and it cannot impersonate the mixed rows of a rollback window, whose
+ * content the edit already superseded. This plugin's own deletion placeholders
+ * and the official compaction checkpoints rewrite context, not content, and
+ * are excluded — a compacted row must keep offering no delete action.
+ *
+ * @param folded - result of {@link foldSurface}.
+ * @param events - the same log the fold was computed from.
+ * @returns `[shadowedSeq, replacementSeq]` pairs, one per edited node.
+ */
+export function contentEditPairs(folded, events) {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const out = []
+  for (const replacement of folded.replacements) {
+    if (replacement.shadowed.length !== 1) continue
+    const event = bySeq.get(replacement.seq)
+    if (!event) continue
+    const data = event.data
+    const source = data && (data.source || (data.message && data.message.source))
+    if (sourceOwnsPlugin(source)) continue
+    if (source && source.kind === 'compact-checkpoint') continue
+    const shadowed = bySeq.get(replacement.shadowed[0])
+    if (!shadowed || shadowed.type !== event.type) continue
+    out.push([replacement.shadowed[0], replacement.seq])
+  }
+  return out
+}
+
+/**
  * Map every event seq to the turn that encloses it.
  *
  * Turn brackets are the durable source for user messages (their payload has no

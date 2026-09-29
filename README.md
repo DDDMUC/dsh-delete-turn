@@ -91,7 +91,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 设计要点：
 
-- **为什么占位是短标记而不是空内容**：官方格式校验把 `system/message` 钉在「打开中的 step」上（不能用于回合外的删除），而 `assistant/message` 禁止携带 `sourceEventSeqs`（无法声明被遮蔽节点）。压缩检查点用的正是 `user/message` 替换；占位必须带一小段文本（`[deleted]`），因为严格网关会拒绝空内容的 user 消息（`user message must have content`），而标记文本不会重放被删除的内容。
+- **为什么占位是一个零宽空格**：官方格式校验把 `system/message` 钉在「打开中的 step」上（不能用于回合外的删除），而 `assistant/message` 禁止携带 `sourceEventSeqs`（无法声明被遮蔽节点）。压缩检查点用的正是 `user/message` 替换，所以载体只能是 `user/message`。user 消息必须有内容——空内容数组虽然能过格式校验，但请求网关会回 400 `user message must have content`（实测）——而 `[deleted]` 这类可见标记又会被模型读到并复述。因此载体只放一个**零宽空格（U+200B）**：对校验器是非空内容，对模型没有可读文本，删除在模型侧不留任何可读痕迹。
 - **为什么不读 React fiber / CSS 哈希类名**：行定位只用官方 `data-chat-flow-*` 锚点与官方 `useChat` 标准 hook，宿主 UI 重构不会静默失效。
 - **为什么刷新后仍然隐藏**：隐藏台账不是浏览器本地状态，而是日志里替换事件的可重放推导；宿主 `/state` 路由在每次打开会话时重建它。
 
@@ -107,7 +107,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 ### 兼容性
 
-- 实测 DSH `0.1.6-alpha.2` 与 `0.1.7-alpha.2`（web profile，Safari / WebKit 与 Chromium 内核均验证）。
+- 实测 DSH `0.1.6-alpha.2`、`0.1.7-alpha.2` 与 `0.2.0-rc.1`（web 与 desktop profile，Safari / WebKit 与 Chromium 内核均验证）。
 - 会话格式 v3 与 v4 都支持：v4 迁移会把插件 source 展平为 `plugin:dsh-delete-turn`，隐藏台账会同时识别 `{ kind: 'plugin', plugin: ... }` 与 `{ kind: 'plugin:...' }` 两代形状。
 - 宿主半区零运行时依赖，全部服务经 cordis ctx 解析；缺少 `sessionQuery` 时回退到 live 会话快照。
 - 不修改 DSH 官方源码，不写任何私有事件类型。
@@ -203,7 +203,7 @@ Browser:
 
 Design notes:
 
-- **Why the placeholder is a short marker, not empty content**: the official format validation pins `system/message` to an open step (unusable for an out-of-band delete) and forbids `sourceEventSeqs` on `assistant/message` (so it cannot cite shadowed nodes). Compaction checkpoints use `user/message` replacements; the placeholder must carry a short text (`[deleted]`) because strict gateways reject a user message with no content (`user message must have content`), and the marker never replays what was removed.
+- **Why the placeholder is a zero-width space**: the official format validation pins `system/message` to an open step (unusable for an out-of-band delete) and forbids `sourceEventSeqs` on `assistant/message` (so it cannot cite shadowed nodes). Compaction checkpoints use `user/message` replacements, so the carrier can only be a `user/message`. A user message must carry content — an empty content array is schema-valid but the request gateway answers 400 `user message must have content` (verified) — and a readable marker like `[deleted]` is quoted back by the model. The carrier therefore holds a single **zero-width space (U+200B)**: non-empty for every validator, no readable text for the model, so the deletion leaves nothing legible on the model side.
 - **Why no React fiber or CSS-module hashing**: rows are addressed through official `data-chat-flow-*` anchors and the official `useChat` standard hook, so a host UI refactor cannot silently detach the actions.
 - **Why a reload stays hidden**: the ledger is not browser state; it is a replay of the replacement events in the log, rebuilt by the host `/state` route.
 
@@ -219,7 +219,7 @@ Design notes:
 
 ### Compatibility
 
-- Verified against DSH `0.1.6-alpha.2` and `0.1.7-alpha.2` (web profile; WebKit and Chromium engines).
+- Verified against DSH `0.1.6-alpha.2`, `0.1.7-alpha.2` and `0.2.0-rc.1` (web and desktop profiles; WebKit and Chromium engines).
 - Both session formats v3 and v4 are supported: the v4 migration flattens plugin sources to `plugin:dsh-delete-turn`, and the hidden ledger recognizes both `{ kind: 'plugin', plugin: ... }` and `{ kind: 'plugin:...' }` shapes.
 - The host half has zero runtime dependencies and resolves every service through the cordis context; it falls back to the live session snapshot when `sessionQuery` is absent.
 - No DSH source is modified and no private event type is written.
