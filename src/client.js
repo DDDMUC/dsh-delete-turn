@@ -468,6 +468,27 @@ window.__ModuleLoader__.load({
     const rowActions = new WeakMap()
     const thinkActions = new WeakMap()
 
+    // Hidden-row attribution (interop contract §4). A row can be hidden by more
+    // than one plugin, and each owner records its own claim on the row, so a
+    // restore must only ever drop the claim this plugin owns. Clearing inline
+    // display while another owner still holds the row would reveal content that
+    // plugin deliberately hid (edit-turn / rerun-turn rewriting a row in place).
+    const HIDE_OWNERS = [
+      ['dshdt', 'data-dshdt-hidden', 'dshdtHidden'],
+      ['dshet', 'data-dshet-hidden', 'dshetHidden'],
+      ['dsrr', 'data-dsrr-hidden', 'dsrrHidden'],
+    ]
+
+    // Does a plugin other than the owner still declare this node hidden?
+    function foreignHideOn(row, own) {
+      for (const [key, attr, prop] of HIDE_OWNERS) {
+        if (key === own) continue
+        if (row.dataset && row.dataset[prop] === '1') return true
+        if (typeof row.hasAttribute === 'function' && row.hasAttribute(attr)) return true
+      }
+      return false
+    }
+
     function setRowHidden(row, hide, animate) {
       if (hide) {
         if (row.dataset.dshdtHidden === '1') return
@@ -498,7 +519,10 @@ window.__ModuleLoader__.load({
       if (row.dataset.dshdtHidden !== '1') return
       delete row.dataset.dshdtHidden
       row.classList.remove('dshdt-collapsing')
-      row.style.display = ''
+      // Another component may still hold this row hidden: drop our own claim and
+      // our collapse styles, but leave display:none in force until that owner
+      // lifts its hide itself. Never reveal a row we do not own.
+      row.style.display = foreignHideOn(row, 'dshdt') ? 'none' : ''
       row.style.height = ''
       row.style.opacity = ''
       row.style.marginTop = ''
@@ -687,7 +711,9 @@ window.__ModuleLoader__.load({
       for (const row of document.querySelectorAll('[data-chat-flow-key][data-chat-turn]')) {
         const turn = row.getAttribute('data-chat-turn')
         if (turn === null || turn === '') continue
-        const visible = row.dataset.dshdtHidden !== '1' && row.getBoundingClientRect().height > 0
+        // A row another component declared hidden is not visible content either.
+        const visible =
+          row.dataset.dshdtHidden !== '1' && !foreignHideOn(row, 'dshdt') && row.getBoundingClientRect().height > 0
         if (seen.get(turn) !== true) seen.set(turn, visible)
       }
       let visibleMarks = 0

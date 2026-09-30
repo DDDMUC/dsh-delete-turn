@@ -105,6 +105,13 @@ UI（官方槽按钮 / DOM 增强按钮）
 - 已经被官方压缩（`/compact`）移出模型上下文的内容不再显示删除入口：它已经不在上下文里，转录用意保留；入口只在内容仍可删时才出现。
 - 宿主侧插件树仅在 DSH 启动时加载：安装、更新插件后必须完全重启 DSH。
 
+### 更新日志
+
+**0.1.6** —— 隐藏归因（互操作契约 I4）。只修 Bug，交互语义不变。
+
+- **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。
+- **English**: rows another plugin is keeping hidden are no longer revealed by this plugin's restore pass — a local `foreignHideOn(row, 'dshdt')` (contract §4) leaves `display:none` in force while `data-dshet-hidden` / `data-dsrr-hidden` is present, so a sibling's hide survives until the sibling lifts it; the turn-navigation rail no longer keeps a jump mark for a turn another plugin declared hidden. New `test/client.test.js` loads the real client bundle against a DOM stub (8 cases).
+
 ### 兼容性
 
 - 实测 DSH `0.1.6-alpha.2`、`0.1.7-alpha.2` 与 `0.2.0-rc.1`（web 与 desktop profile，Safari / WebKit 与 Chromium 内核均验证）。
