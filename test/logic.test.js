@@ -267,6 +267,8 @@ test('deletableReplyTurns skips turns with no reply content left', () => {
 test('the ledger recognizes the v4 flattened plugin source', () => {
   assert.equal(sourceOwnsPlugin({ kind: 'plugin', plugin: PLUGIN_ID }), true)
   assert.equal(sourceOwnsPlugin({ kind: `plugin:${PLUGIN_ID}` }), true)
+  assert.equal(sourceOwnsPlugin({ kind: 'system-prompt', plugin: PLUGIN_ID }), true)
+  assert.equal(sourceOwnsPlugin({ kind: 'system-prompt' }), false)
   assert.equal(sourceOwnsPlugin({ kind: 'plugin', plugin: 'somebody-else' }), false)
   assert.equal(sourceOwnsPlugin({ kind: 'plugin:somebody-else' }), false)
 

@@ -171,6 +171,7 @@ window.__ModuleLoader__.load({
           surface: new Set(),
           replyTurns: new Set(),
           edits: new Map(),
+          markerTurns: new Set(),
           surfaceReady: false,
           surfaceThrough: -1,
           loaded: false,
@@ -239,8 +240,12 @@ window.__ModuleLoader__.load({
             for (const pair of Array.isArray(data.edits) ? data.edits : []) {
               if (Array.isArray(pair) && typeof pair[0] === 'number' && typeof pair[1] === 'number') edits.set(pair[0], pair[1])
             }
+            const markerTurns = new Set()
+            for (const turn of Array.isArray(data.markerTurns) ? data.markerTurns : []) {
+              if (typeof turn === 'number') markerTurns.add(turn)
+            }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, surface, replyTurns, edits, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, surface, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -617,6 +622,15 @@ window.__ModuleLoader__.load({
         if (!(row instanceof HTMLElement)) continue
         const key = row.getAttribute('data-chat-flow-key')
         if (!key) continue
+        // A deletion opens a bookkeeping turn to host its empty carrier; the
+        // host still draws a process row for it, so hide the whole turn.
+        const turn = row.getAttribute('data-chat-turn')
+        if (turn !== null && view.markerTurns.has(Number(turn))) {
+          setRowHidden(row, true, animate)
+          removeRowAction(row)
+          delete row.dataset.dshdtNoTarget
+          continue
+        }
         const node = snapshot.nodes.get(key)
         if (!node) {
           // Process group rows carry a composite key ("["process", memberKey,

@@ -83,13 +83,16 @@ export function messageIdOf(event) {
  * flattens plugin sources: `{ kind: 'plugin', plugin: X }` becomes
  * `{ kind: 'plugin:X' }`. Both shapes must be recognized, because a session
  * keeps its on-disk v3 log until it is opened, and reads after that return the
- * canonical v4 shape.
+ * canonical v4 shape. Deletion carriers written as system messages cannot use a
+ * plugin kind at all — both replay validators require `system-prompt` — so they
+ * carry the plugin id in an extra `plugin` key instead.
  * @param source - message source object from a log event.
  * @returns true when the source names this plugin.
  */
 export function sourceOwnsPlugin(source) {
   if (!source || typeof source !== 'object') return false
   if (source.kind === 'plugin' && source.plugin === PLUGIN_ID) return true
+  if (source.kind === 'system-prompt' && source.plugin === PLUGIN_ID) return true
   return source.kind === `plugin:${PLUGIN_ID}`
 }
 

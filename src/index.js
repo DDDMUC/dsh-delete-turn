@@ -18,6 +18,9 @@
 // the plugin loads on any profile and degrades to a clear HTTP failure when a
 // service is absent.
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { dirname } from 'node:path'
 import { PLUGIN_ID, PlanError, contentEditPairs, deletableReplyTurns, foldSurface, hiddenEntriesOfFold, isBusy, planRange } from './logic.js'
 
 export const name = PLUGIN_ID
@@ -25,6 +28,28 @@ export const name = PLUGIN_ID
 const ROUTE_PREFIX = '/dsh-delete-turn'
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MODES = new Set(['message', 'step', 'reply'])
+
+// The one adapter line that makes a deletion invisible: `dsh-llm-pi-ai` drops a
+// user message whose converted content is empty (the official DeepSeek adapter
+// already does; upstream has not added the pi-ai skip yet). When that line is
+// present, the carrier can be an empty content list and never reaches any
+// model; otherwise it must carry a zero-width space, which every provider
+// accepts. The probe reads the installed adapter once at load; any failure
+// falls back to the safe carrier.
+const ADAPTER_PATCH_MARKER = 'dsh-delete-turn:skip-empty-user'
+
+function adapterDropsEmptyUserContent() {
+  try {
+    const entry = process.argv[1]
+    const require = createRequire(entry ?? import.meta.url)
+    const resolved = require.resolve('@deepseek-ai/dsh-llm-pi-ai', { paths: entry ? [dirname(entry)] : [] })
+    return readFileSync(resolved, 'utf8').includes(ADAPTER_PATCH_MARKER)
+  } catch {
+    return false
+  }
+}
+
+const SILENT_CARRIER = adapterDropsEmptyUserContent()
 
 class HttpError extends Error {
   constructor(status, code, message) {
@@ -141,6 +166,21 @@ async function flushSession(ctx, session) {
 
 // --- operations --------------------------------------------------------------
 
+// Turns opened purely as deletion bookkeeping: each carries one empty carrier
+// system message and no real content. The host still renders a process row
+// ("用时 N 秒") for them, so the browser half needs their numbers to hide them.
+function markerTurnsOf(events) {
+  const turns = new Set()
+  for (const event of events) {
+    if (event.type !== 'system/message') continue
+    const data = event.data || {}
+    const source = (data.message && data.message.source) || {}
+    if (source.kind !== 'system-prompt' || source.plugin !== PLUGIN_ID) continue
+    if (typeof data.turn === 'number') turns.add(data.turn)
+  }
+  return [...turns].sort((a, b) => a - b)
+}
+
 async function stateOf(ctx, sessionId) {
   const events = await readEvents(ctx, sessionId)
   if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
@@ -160,6 +200,9 @@ async function stateOf(ctx, sessionId) {
     // replacement, so the browser half needs the chain to keep the row's
     // action and to address the live node.
     edits: contentEditPairs(folded, events),
+    // Bookkeeping turns a deletion opened (they must not show as empty
+    // process rows in the transcript).
+    markerTurns: markerTurnsOf(events),
     live: Boolean(findLiveSession(ctx, sessionId)),
     busy: isBusy(events),
     lastSeq: events.length > 0 ? events[events.length - 1].seq : -1,
@@ -200,24 +243,30 @@ async function deleteTarget(ctx, sessionId, body) {
     if (!surfaceNodes.includes(seq)) throw new HttpError(409, 'stale', 'the session changed, retry')
   }
 
+  // The carrier must be a turn-less `user/message`.
+  //
+  // Opening a synthetic turn+step to host a model-invisible empty
+  // `system/message` corrupts the log: the agent loop advances its turn counter
+  // only from the turns it opens itself, so its next real turn reuses the
+  // number this plugin burned (`turn/start does not open the expected turn` on
+  // the next cold read) and every turn-number-keyed client hiding then swallows
+  // the reused turn's rows. That failure was reproduced in production; do not
+  // reintroduce a synthetic turn here.
+  //
+  // What the carrier holds depends on the installed pi-ai adapter: when it
+  // drops empty user content (see {@link adapterDropsEmptyUserContent}) the
+  // carrier is an empty content list and never reaches any model; otherwise the
+  // safest accepted content is a single ZERO-WIDTH SPACE (a readable marker
+  // like "[deleted]" is quoted back by the model, and empty content is refused
+  // by gateways whose adapter predates that skip).
   let replacement
   try {
-    // A replacement carrier must be a user/message: the official format
-    // validation pins system/message to an open step (so it cannot carry an
-    // out-of-band deletion) and forbids sourceEventSeqs on assistant/message
-    // (so it cannot cite the shadowed nodes). A compaction checkpoint is the
-    // same shape. A user message MUST carry content — an empty content array
-    // is schema-valid but the request gateway answers 400 "user message must
-    // have content" — while a marker like "[deleted]" is read back by the
-    // model. The carrier therefore holds a single ZERO-WIDTH SPACE: non-empty
-    // for every validator, and no readable text for the model, so the deletion
-    // leaves nothing legible in the context.
     replacement = session.append(
       'user/message',
       {
         id: randomUUID(),
         role: 'user',
-        content: [{ type: 'text', text: '\u200b' }],
+        content: SILENT_CARRIER ? [] : [{ type: 'text', text: '\u200b' }],
         // v4 format: plugin wrappers are retired; the producer kind carries the id.
         source: { kind: `plugin:${PLUGIN_ID}` },
       },

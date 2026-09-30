@@ -91,7 +91,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 设计要点：
 
-- **为什么占位是一个零宽空格**：官方格式校验把 `system/message` 钉在「打开中的 step」上（不能用于回合外的删除），而 `assistant/message` 禁止携带 `sourceEventSeqs`（无法声明被遮蔽节点）。压缩检查点用的正是 `user/message` 替换，所以载体只能是 `user/message`。user 消息必须有内容——空内容数组虽然能过格式校验，但请求网关会回 400 `user message must have content`（实测）——而 `[deleted]` 这类可见标记又会被模型读到并复述。因此载体只放一个**零宽空格（U+200B）**：对校验器是非空内容，对模型没有可读文本，删除在模型侧不留任何可读痕迹。
+- **为什么载体是 turn-less 的零宽空格 user 消息（绝不能开合成回合）**：删除的替换载体只能是**不带回合的 `user/message`**。开一个「合成 turn+step」来安放对模型隐身的空 `system/message` 会**损坏日志**：agent loop 只从它自己开的回合推进回合号，外部开掉的回合号会被它的下一个真实回合复用（冷读报 `turn/start does not open the expected turn`），而任何按回合号做隐藏的客户端都会把被复用的那个真实回合整轮吞掉——此故障已在真实会话里复现（消息「被吞掉」）。因此载体退回 turn-less 形状，内容用**单个零宽空格**（空内容数组会被网关 400 `user message must have content`，可读标记会被模型复述；零宽空格对校验器非空、对模型无字面文本）。代价：模型可能把这条载体读成一条空白 user 消息。历史日志里已经写入的簿记回合（旧版本产生）由客户端按 `/state` 的 `markerTurns` 隐藏。
 - **为什么不读 React fiber / CSS 哈希类名**：行定位只用官方 `data-chat-flow-*` 锚点与官方 `useChat` 标准 hook，宿主 UI 重构不会静默失效。
 - **为什么刷新后仍然隐藏**：隐藏台账不是浏览器本地状态，而是日志里替换事件的可重放推导；宿主 `/state` 路由在每次打开会话时重建它。
 
@@ -203,7 +203,7 @@ Browser:
 
 Design notes:
 
-- **Why the placeholder is a zero-width space**: the official format validation pins `system/message` to an open step (unusable for an out-of-band delete) and forbids `sourceEventSeqs` on `assistant/message` (so it cannot cite shadowed nodes). Compaction checkpoints use `user/message` replacements, so the carrier can only be a `user/message`. A user message must carry content — an empty content array is schema-valid but the request gateway answers 400 `user message must have content` (verified) — and a readable marker like `[deleted]` is quoted back by the model. The carrier therefore holds a single **zero-width space (U+200B)**: non-empty for every validator, no readable text for the model, so the deletion leaves nothing legible on the model side.
+- **Why the carrier is a turn-less zero-width user message (never open a synthetic turn)**: the replacement carrier can only be a **`user/message` with no turn bracket**. Opening a synthetic turn+step to host a model-invisible empty `system/message` **corrupts the log**: the agent loop advances its turn counter only from the turns it opens itself, so its next real turn reuses the number this plugin burned (`turn/start does not open the expected turn` on the next cold read), and any turn-number-keyed client hiding then swallows that reused real turn — reproduced in production as messages “being eaten”. The carrier therefore stays turn-less, with a single **zero-width space**: truly empty content is refused by the gateway with 400 `user message must have content`, and a readable marker gets quoted back by the model; a zero-width space is non-empty for every validator and carries no literal text. The cost: the model may read it as one blank user message. Bookkeeping turns already written to historical logs (older versions) are hidden client-side via `markerTurns` from `/state`.
 - **Why no React fiber or CSS-module hashing**: rows are addressed through official `data-chat-flow-*` anchors and the official `useChat` standard hook, so a host UI refactor cannot silently detach the actions.
 - **Why a reload stays hidden**: the ledger is not browser state; it is a replay of the replacement events in the log, rebuilt by the host `/state` route.
 

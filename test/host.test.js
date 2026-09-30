@@ -29,12 +29,14 @@ function buildEvents() {
   ]
 }
 
-function harness(events) {
-  const calls = { appended: null, routes: new Map() }
+function harness(events, options = {}) {
+  const calls = { appends: [], routes: new Map() }
   const session = {
     surface: { nodes: foldSurface(events).nodes },
     append(type, data, intent) {
-      calls.appended = { type, data, intent }
+      if (options.failOn === type) throw new Error('the surface refused')
+      const entry = { type, data, intent }
+      calls.appends.push(entry)
       return { seq: events.length, time: 99, type, data, ...intent }
     },
   }
@@ -85,7 +87,7 @@ function fakeRes() {
   }
 }
 
-test('the delete route appends a silent zero-width carrier', async () => {
+test('the delete route appends a single turn-less carrier', async () => {
   const events = buildEvents()
   const { ctx, calls } = harness(events)
   apply(ctx)
@@ -99,13 +101,19 @@ test('the delete route appends a silent zero-width carrier', async () => {
   assert.equal(res.statusCode, 200)
   assert.equal(payload.ok, true)
   assert.deepEqual(payload.hidden, [{ seq: 3, mode: 'message' }])
-  assert.equal(calls.appended.type, 'user/message')
-  // The empty array is schema-valid but the request gateway rejects it
-  // ("user message must have content"); a zero-width space is non-empty for
-  // every validator and carries no readable text for the model.
-  assert.deepEqual(calls.appended.data.content, [{ type: 'text', text: '\u200b' }])
-  assert.deepEqual(calls.appended.intent.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
-  assert.deepEqual(calls.appended.intent.sourceEventSeqs, [3])
+
+  // A synthetic turn+step must never be opened here: the agent loop counts only
+  // the turns it opens itself, so the next real turn would reuse the number and
+  // corrupt the log. The carrier is a turn-less user/message holding a single
+  // zero-width space (empty content is gateway-rejected).
+  assert.equal(calls.appends.length, 1)
+  const [carrier] = calls.appends
+  assert.equal(carrier.type, 'user/message')
+  assert.deepEqual(carrier.data.content, [{ type: 'text', text: '\u200b' }])
+  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn' })
+  assert.deepEqual(carrier.intent.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
+  assert.deepEqual(carrier.intent.sourceEventSeqs, [3])
+  assert.equal(payload.replacementSeq, 5)
 })
 
 test('an own carrier on the surface can be deleted again with mode message', () => {
@@ -122,4 +130,40 @@ test('an own carrier on the surface can be deleted again with mode message', () 
   assert.deepEqual(nodes, [2, 5])
   const plan = planRange(events, nodes, { mode: 'message', seq: 5 })
   assert.deepEqual(plan.shadowed, [5])
+})
+
+function fakeGet(url) {
+  const req = new EventEmitter()
+  req.method = 'GET'
+  req.url = url
+  req.socket = { remoteAddress: '127.0.0.1' }
+  req.headers = { host: '127.0.0.1:3080', accept: 'application/json' }
+  return req
+}
+
+test('the state route reports deletion bookkeeping turns', async () => {
+  const carrier = {
+    seq: 5,
+    time: 6,
+    type: 'system/message',
+    data: {
+      turn: 2,
+      step: 1,
+      message: { id: 'del-1', role: 'system', content: [], source: { kind: 'system-prompt', plugin: 'dsh-delete-turn' } },
+    },
+    surfaceOp: { op: 'replace', startSeq: 3, endSeq: 3 },
+    sourceEventSeqs: [3],
+  }
+  const events = [...buildEvents(), carrier]
+  const { ctx, calls } = harness(events)
+  apply(ctx)
+  const route = calls.routes.get('/dsh-delete-turn/state')
+  assert.ok(route, 'the state route must be registered')
+
+  const res = fakeRes()
+  await route.handler(fakeGet(`/dsh-delete-turn/state?sessionId=${SESSION_ID}`), res)
+  const payload = JSON.parse(res.body)
+  assert.equal(res.statusCode, 200)
+  assert.deepEqual(payload.hidden, [{ seq: 3, mode: 'message', replacement: 5 }])
+  assert.deepEqual(payload.markerTurns, [2])
 })
