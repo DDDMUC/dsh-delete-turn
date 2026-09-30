@@ -275,7 +275,10 @@ class StubDocument {
 const DEFAULT_PAYLOAD = { ok: true, hidden: [], surface: [3], replyTurns: [], edits: [], markerTurns: [], lastSeq: 3 }
 
 function createEnv(options = {}) {
-  const document = new StubDocument()
+  // A caller can hand in a document another module instance already worked on:
+  // that is what a re-apply over a live page looks like (new factory, new
+  // module-level WeakMaps, same DOM).
+  const document = options.document || new StubDocument()
   const state = { loaded: null, fetchCalls: [], rafQueue: [], timers: [], observers: [], cleanups: [] }
   const payload = options.payload || DEFAULT_PAYLOAD
   const fetchStub = (url, init) => {
@@ -386,8 +389,15 @@ function mount(options = {}) {
   const env = createEnv(options)
   const components = new Map()
   const locales = new Map()
+  // Every cleanup an effect registered, so a test can run what a fiber teardown
+  // runs (cordis disposes them newest first).
+  const disposers = []
   const ctx = {
-    effect: (fn) => fn(),
+    effect: (fn) => {
+      const cleanup = fn()
+      if (typeof cleanup === 'function') disposers.push(cleanup)
+      return cleanup
+    },
     inject: (names, fn) => fn({}),
     slots: {
       inject: (name, fn) => fn(),
@@ -406,6 +416,9 @@ function mount(options = {}) {
   env.module.apply(ctx)
   env.components = components
   env.locales = locales
+  env.dispose = () => {
+    for (const cleanup of disposers.splice(0).reverse()) cleanup()
+  }
   return env
 }
 
@@ -568,6 +581,181 @@ test('repeated observer passes reuse one button and never move a foreign sibling
   assert.equal(bar.lastElementChild, foreign, 'a foreign sibling keeps its position')
   assert.equal(hostButton.parentElement, bar, 'the host own button is untouched')
   assert.equal(row.querySelectorAll('.dshdt-action').length, 1)
+})
+
+// --- I3 re-apply: a second apply adopts, it never stacks --------------------
+//
+// The live symptom this locks down: the bundle is re-applied while the page
+// keeps its DOM (HMR, a plugin toggle, a bundle-group reload). Every apply
+// starts with a fresh module instance - fresh WeakMaps - while the host nodes
+// the previous one injected are still sitting in the rows, so an injection that
+// cannot recognise its own nodes stacks one more button per apply.
+
+test('a re-apply round leaves exactly one host and never touches host or foreign nodes', async () => {
+  const document = new StubDocument()
+  const first = mountOverlay({ document })
+  const row = first.env.addRow({ key: 'k1', turn: 1, actions: true })
+  const bar = row.querySelector('[class*="_actions"]')
+  const hostButton = bar.firstElementChild
+  const foreign = document.createElement('span')
+  foreign.setAttribute('data-dshet-action', '1')
+  bar.appendChild(foreign)
+  const snapshot = first.env.snapshotFor(row)
+
+  first.render(snapshot)
+  await first.env.settle()
+  first.render(snapshot)
+  const before = row.querySelectorAll('.dshdt-action-host')
+  assert.equal(before.length, 1, 'the first apply injects exactly one host')
+  const injected = before[0]
+
+  assert.equal(bar.childNodes[0], hostButton, 'the host own button stays first')
+  assert.equal(bar.childNodes[1], foreign, 'a sibling plugin node keeps its position')
+  assert.equal(bar.childNodes[2], injected, 'our host is appended behind both')
+
+  // What a fiber teardown runs: the nodes this plugin injected go away, and
+  // nothing else does.
+  first.env.dispose()
+  assert.equal(injected.parentElement, null, 'dispose takes the injected host away')
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 0, 'no injected host survives a dispose')
+  assert.equal(bar.childNodes.length, 2, 'dispose removed exactly the node it injected')
+  assert.equal(bar.childNodes[0], hostButton, 'dispose never touches the host own button')
+  assert.equal(bar.childNodes[1], foreign, 'dispose never touches a sibling plugin node')
+
+  // A fresh module instance onto the same, still-live DOM.
+  const second = mountOverlay({ document })
+  second.render(snapshot)
+  await second.env.settle()
+  second.render(snapshot)
+
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'the second apply leaves one host')
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1, 'and one button')
+  assert.equal(bar.childNodes[0], hostButton, 'the host own button is still first')
+  assert.equal(bar.childNodes[1], foreign, 'the sibling plugin node is still next')
+  assert.equal(bar.childNodes.length, 3, 'exactly one injected host came back')
+
+  // A third round, to catch anything that only leaks after two of them.
+  second.env.dispose()
+  const third = mountOverlay({ document })
+  third.render(snapshot)
+  await third.env.settle()
+  third.render(snapshot)
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'still one host after two re-applies')
+  assert.equal(document.querySelectorAll('style[data-plugin-css="dsh-delete-turn/delete-turn.css"]').length, 1, 'the style tag never stacks either')
+})
+
+test('a second live instance adopts the existing host node instead of rebuilding it', async () => {
+  const document = new StubDocument()
+  const first = mountOverlay({ document })
+  const row = first.env.addRow({ key: 'k1', turn: 1, actions: true })
+  const bar = row.querySelector('[class*="_actions"]')
+  const snapshot = first.env.snapshotFor(row)
+
+  first.render(snapshot)
+  await first.env.settle()
+  const tree = first.render(snapshot)
+  assert.equal(tree.props.children[0].props['data-dshdt-overlay'], '1', 'the slot root carries the namespace too')
+  const host = row.querySelectorAll('.dshdt-action-host')[0]
+  assert.equal(host.getAttribute('data-dshdt-action-host'), '1', 'the injected host carries this plugin namespace')
+
+  // Re-applied over a live page: no teardown has run yet, so the previous
+  // instance's node is still there. This is the order the ghost buttons came
+  // from, and it must end in one node, the same object (contract §5: never
+  // remove and re-insert).
+  const second = mountOverlay({ document })
+  second.render(snapshot)
+  await second.env.settle()
+  second.render(snapshot)
+
+  const after = row.querySelectorAll('.dshdt-action-host')
+  assert.equal(after.length, 1, 'no ghost host is stacked on the row')
+  assert.equal(after[0], host, 'the existing node is adopted as it is')
+  assert.equal(host.parentElement, bar, 'adoption does not move it either')
+
+  // The old instance is torn down afterwards (a reload racing a re-apply). Its
+  // sweep takes that node out; the live instance still holds it and puts it
+  // back, which is the self-healing we want.
+  first.env.dispose()
+  second.render(snapshot)
+  const settled = row.querySelectorAll('.dshdt-action-host')
+  assert.equal(settled.length, 1, 'exactly one host once the old instance is gone')
+  assert.equal(settled[0], host, 'the surviving instance re-attaches the node it holds')
+})
+
+test('a host left by a build without the namespace attribute is adopted, not duplicated', async () => {
+  const document = new StubDocument()
+  const { env, render } = mountOverlay({ document })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const bar = row.querySelector('[class*="_actions"]')
+  // What the previous release of this bundle leaves behind: class only, no
+  // namespace attribute, so the WeakMap of the new module cannot see it.
+  const ghost = document.createElement('span')
+  ghost.className = 'dshdt-action-host'
+  const ghostButton = document.createElement('button')
+  ghostButton.className = 'dshdt-action dshdt-row-action'
+  ghost.appendChild(ghostButton)
+  bar.appendChild(ghost)
+  const snapshot = env.snapshotFor(row)
+
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  const hosts = row.querySelectorAll('.dshdt-action-host')
+  assert.equal(hosts.length, 1, 'the pre-namespace host is adopted instead of stacking a ghost')
+  assert.equal(hosts[0], ghost)
+  assert.equal(ghost.getAttribute('data-dshdt-action-host'), '1', 'the adopted host is stamped with the namespace')
+  assert.equal(ghostButton.getAttribute('aria-label'), '删除这条消息', 'the adopted button is rewired to this instance')
+})
+
+test('row and reasoning hosts are adopted separately and never swapped', async () => {
+  const document = new StubDocument()
+  const first = mountOverlay({ document })
+  const row = first.env.addRow({ key: 'k1', turn: 1 })
+  const think = document.createElement('div')
+  think.setAttribute('data-variant', 'think')
+  row.appendChild(think)
+  const snapshot = { nodes: new Map([['k1', { kind: 'assistant-step', data: { seq: 3, finalNode: { seq: 3 } }, anchorSeq: 3 }]]) }
+  const rowHosts = () => row.querySelectorAll('.dshdt-action-host').filter((host) => !host.classList.contains('dshdt-think-action'))
+  const thinkHosts = () => think.querySelectorAll('.dshdt-action-host')
+
+  first.render(snapshot)
+  await first.env.settle()
+  first.render(snapshot)
+  assert.equal(rowHosts().length, 1, 'the row gets its own host')
+  assert.equal(thinkHosts().length, 1, 'the reasoning card gets its own host')
+  const firstRowHost = rowHosts()[0]
+  const firstThinkHost = thinkHosts()[0]
+  assert.notEqual(firstRowHost, firstThinkHost)
+  assert.equal(firstThinkHost.getAttribute('data-dshdt-think-action'), '1', 'a reasoning host is marked as such')
+  assert.equal(firstRowHost.hasAttribute('data-dshdt-think-action'), false, 'a row host is not')
+  assert.equal(firstThinkHost.parentElement, think, 'the reasoning button stays inside the reasoning card')
+
+  // Second instance while the first one's nodes are still in the DOM. The
+  // reasoning host is inside the message row, so a row injection that only
+  // looked for "my namespace attribute" would hijack the reasoning button and
+  // pull it into the message row.
+  const second = mountOverlay({ document })
+  second.render(snapshot)
+  await second.env.settle()
+  second.render(snapshot)
+
+  assert.equal(rowHosts().length, 1, 'still one row host')
+  assert.equal(thinkHosts().length, 1, 'still one reasoning host')
+  assert.equal(rowHosts()[0], firstRowHost, 'the row host is the same node')
+  assert.equal(thinkHosts()[0], firstThinkHost, 'the reasoning host is the same node')
+  assert.equal(thinkHosts()[0].parentElement, think, 'the reasoning host is still inside the reasoning card')
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 2, 'two hosts in this row, no ghosts')
+
+  first.env.dispose()
+  second.env.dispose()
+  const third = mountOverlay({ document })
+  third.render(snapshot)
+  await third.env.settle()
+  third.render(snapshot)
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 2, 'one row host and one reasoning host after the round')
+  assert.equal(thinkHosts().length, 1)
+  assert.equal(rowHosts().length, 1)
 })
 
 // --- I6 web / desktop isomorphism ------------------------------------------

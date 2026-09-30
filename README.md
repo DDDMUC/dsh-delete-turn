@@ -107,6 +107,11 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 ### 更新日志
 
+**0.1.7** —— 重新 apply 时清理自己的注入节点（互操作契约 I3）。只修 Bug，交互语义不变。
+
+- **修复：插件被重新 apply（HMR / 插件开关 / bundle 组重载）时不再堆出幽灵按钮**。每次 apply 都是新的模块实例、新的 `WeakMap`，而上一次 apply 注入的宿主还留在行里，于是同一条行上叠出多个删除按钮——真机 CDP 只读探针曾在同一行数到 3 个 `.dshdt-action-host`。现在：①注入前先按命名空间属性 `[data-dshdt-action-host="1"]` 查一次已有宿主，找到就**复用同一个节点**（不 remove + re-insert），上一版留下、还没有属性的旧节点按 `.dshdt-action-host` 兜底认领并补上属性；②行内宿主与思考卡宿主分别用 `data-dshdt-action-host` / `data-dshdt-think-action` 认领，行不会把思考卡里的步骤按钮抢走；③`ctx.effect` 的清理函数里按命名空间属性**全局扫掉**本插件注入的宿主（槽根节点也带上了命名空间标记），只删自己的节点，宿主的按钮与兄弟插件的节点一律不动。新增 4 条 `test/client.test.js` 用例覆盖「apply → dispose → 再 apply」与两个实例同时在场的时序。
+- **English**: re-applying the bundle (HMR, plugin toggle, group reload) no longer stacks ghost buttons — every injected host carries `data-dshdt-action-host="1"` (a reasoning host additionally `data-dshdt-think-action="1"`), an injection adopts the host a previous apply left in the row instead of adding a second one, and the `ctx.effect` teardown sweeps every node this plugin injected, matched by its own namespace, while host and sibling nodes are left alone. 4 new `test/client.test.js` cases cover apply → dispose → apply.
+
 **0.1.6** —— 隐藏归因（互操作契约 I4）。只修 Bug，交互语义不变。
 
 - **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。

@@ -465,8 +465,74 @@ window.__ModuleLoader__.load({
 
     // --- dom enhancement ------------------------------------------------------
 
-    const rowActions = new WeakMap()
-    const thinkActions = new WeakMap()
+    // Every node this plugin injects carries its own namespace attribute
+    // (interop contract I3). Two lookups depend on it: an injection adopts the
+    // host an earlier apply left in the row instead of stacking a second button
+    // beside it, and a dispose finds its own nodes again. A WeakMap can do
+    // neither job on its own - it dies with the module instance while the DOM
+    // does not, and a re-apply (HMR, plugin toggle, bundle-group reload) starts
+    // with fresh module state over the very same page.
+    const HOST_MARK = 'data-dshdt-action-host'
+    const THINK_MARK = 'data-dshdt-think-action'
+    const HOST_CLASS = 'dshdt-action-host'
+    const THINK_CLASS = 'dshdt-think-action'
+
+    let rowActions = new WeakMap()
+    let thinkActions = new WeakMap()
+
+    function isThinkHost(host) {
+      return host.getAttribute(THINK_MARK) === '1' || host.classList.contains(THINK_CLASS)
+    }
+
+    // Our own host inside `scope` (a message row, a reasoning card), when an
+    // earlier apply left one behind. The namespace attribute is the lookup the
+    // injector must run before building anything; the class is the fallback for
+    // a host injected by a build that predates the attribute, so an upgrade
+    // adopts that one too instead of stacking a ghost next to it. Only nodes
+    // carrying this plugin's own attribute or class can ever match (I3).
+    function findOwnedHost(scope, wantThink) {
+      for (const host of scope.querySelectorAll('[' + HOST_MARK + '="1"]')) {
+        if (isThinkHost(host) === wantThink) return host
+      }
+      for (const host of scope.querySelectorAll('.' + HOST_CLASS)) {
+        if (isThinkHost(host) === wantThink) return host
+      }
+      return null
+    }
+
+    // Reuse `host` - stamping the namespace on a node an older build left, and
+    // rebuilding a button it lost - or build the host this injection needs.
+    function adoptHost(host, kind) {
+      if (host === null) host = document.createElement('span')
+      host.className = kind === 'think' ? HOST_CLASS + ' ' + THINK_CLASS : HOST_CLASS
+      host.setAttribute(HOST_MARK, '1')
+      if (kind === 'think') host.setAttribute(THINK_MARK, '1')
+      let button = host.querySelector('button')
+      if (button === null) {
+        button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'dshdt-action dshdt-row-action'
+        button.innerHTML = ICON_MARKUP
+        host.appendChild(button)
+      }
+      return { host, button }
+    }
+
+    // Drop every node this plugin injected. Matched through this plugin's own
+    // namespace, never by position: the host's own buttons, a sibling plugin's
+    // nodes and the React-rendered overlay are not ours to remove (I3). Nodes
+    // React owns are deliberately left alone - removing one behind React's back
+    // breaks its own unmount. The style tag stays too: it is deduplicated by its
+    // own marker further up, and dropping it here would strip the CSS from an
+    // instance that has already re-applied.
+    function sweepInjectedNodes() {
+      for (const host of document.querySelectorAll('[' + HOST_MARK + '="1"]')) host.remove()
+      for (const host of document.querySelectorAll('.' + HOST_CLASS)) host.remove()
+      // These entries now point at detached nodes; the next injection re-adopts
+      // from the DOM instead of trusting them.
+      rowActions = new WeakMap()
+      thinkActions = new WeakMap()
+    }
 
     // Hidden-row attribution (interop contract §4). A row can be hidden by more
     // than one plugin, and each owner records its own claim on the row, so a
@@ -542,14 +608,9 @@ window.__ModuleLoader__.load({
       const label = t(`action.tooltip.${target.label}`)
       let entry = rowActions.get(row)
       if (!entry) {
-        const host = document.createElement('span')
-        host.className = 'dshdt-action-host'
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = 'dshdt-action dshdt-row-action'
-        button.innerHTML = ICON_MARKUP
-        host.appendChild(button)
-        entry = { host, button }
+        // Never a second host on a row that already carries one: an earlier
+        // apply's node is adopted as it is (no remove + re-insert, contract §5).
+        entry = adoptHost(findOwnedHost(row, false), 'row')
         rowActions.set(row, entry)
       }
       const { host, button } = entry
@@ -588,14 +649,9 @@ window.__ModuleLoader__.load({
       const label = t('action.tooltip.step')
       let entry = thinkActions.get(think)
       if (!entry) {
-        const host = document.createElement('span')
-        host.className = 'dshdt-action-host dshdt-think-action'
-        const button = document.createElement('button')
-        button.type = 'button'
-        button.className = 'dshdt-action dshdt-row-action'
-        button.innerHTML = ICON_MARKUP
-        host.appendChild(button)
-        entry = { host, button }
+        // A reasoning card lives inside its message row, so the row lookup above
+        // must not confuse the two: each kind adopts only its own host.
+        entry = adoptHost(findOwnedHost(think, true), 'think')
         thinkActions.set(think, entry)
       }
       const { host, button } = entry
@@ -821,7 +877,9 @@ window.__ModuleLoader__.load({
       }, [snapshot, view, controller, t])
 
       return jsxs(Fragment, {
-        children: [jsx('span', { hidden: true }), jsx(ConfirmDialog, { view, controller, t })],
+        // The slot root carries this plugin's namespace as well (I3). It is
+        // React's node: the dispose sweep must not touch it.
+        children: [jsx('span', { hidden: true, 'data-dshdt-overlay': '1' }), jsx(ConfirmDialog, { view, controller, t })],
       })
     }
 
@@ -845,6 +903,18 @@ window.__ModuleLoader__.load({
           controllers.clear()
         },
         'dsh-delete-turn: per-session controllers',
+      )
+
+      // A re-apply runs over the page the previous apply already decorated. The
+      // old nodes are still in the rows and the new module instance cannot see
+      // them through its WeakMaps, so without this sweep every apply stacks one
+      // more button per row. Only nodes carrying this plugin's own namespace are
+      // removed (contract I3).
+      ctx.effect(
+        () => () => {
+          sweepInjectedNodes()
+        },
+        'dsh-delete-turn: injected nodes',
       )
 
       ctx.slots.inject('conversation.chat.assistant-actions', () =>
