@@ -168,6 +168,8 @@ window.__ModuleLoader__.load({
         this.animateOnce = false
         this.view = Object.freeze({
           hidden: new Map(),
+          // replacement seq -> the seq it was recorded as shadowing. See hiddenViaOf.
+          hiddenVia: new Map(),
           surface: new Set(),
           replyTurns: new Set(),
           edits: new Map(),
@@ -232,6 +234,7 @@ window.__ModuleLoader__.load({
             for (const item of Array.isArray(data.hidden) ? data.hidden : []) {
               if (item && typeof item.seq === 'number') hidden.set(item.seq, typeof item.mode === 'string' ? item.mode : 'message')
             }
+            const hiddenVia = hiddenViaOf(data.hidden)
             const surface = new Set()
             for (const seq of Array.isArray(data.surface) ? data.surface : []) surface.add(seq)
             const replyTurns = new Set()
@@ -245,7 +248,7 @@ window.__ModuleLoader__.load({
               if (typeof turn === 'number') markerTurns.add(turn)
             }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, surface, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, hiddenVia, surface, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -297,8 +300,10 @@ window.__ModuleLoader__.load({
           for (const item of Array.isArray(data.hidden) ? data.hidden : []) {
             if (item && typeof item.seq === 'number') hidden.set(item.seq, typeof item.mode === 'string' ? item.mode : target.mode)
           }
+          const hiddenVia = new Map(this.view.hiddenVia)
+          for (const [via, seq] of hiddenViaOf(data.hidden)) hiddenVia.set(via, seq)
           this.animateOnce = true
-          this.publish({ pending: false, dialog: null, hidden, loaded: true, loadError: false })
+          this.publish({ pending: false, dialog: null, hidden, hiddenVia, loaded: true, loadError: false })
         } catch {
           this.publish({ pending: false, failure: 'generic' })
         }
@@ -456,9 +461,27 @@ window.__ModuleLoader__.load({
       return seq === target.seq ? target : { ...target, seq }
     }
 
-    function isRowHidden(hidden, seqs) {
+    // Index a deletion by the REPLACEMENT it landed, not only by the seq it
+    // shadowed. A deleted message leaves a carrier standing in its row, and the
+    // transcript row names the live node (the carrier), so a row checked against
+    // 'hidden' alone never matches: the deletion succeeds, the model context
+    // loses the message, and the row is simply never hidden - an empty bubble
+    // left behind. The link is already on every hidden entry ('replacement'), so
+    // it is indexed here rather than derived from 'edits': that chain
+    // deliberately excludes this plugin's own carriers (they rewrite context,
+    // not content) and so cannot bridge the gap.
+    function hiddenViaOf(items) {
+      const via = new Map()
+      for (const item of Array.isArray(items) ? items : []) {
+        if (item && typeof item.seq === 'number' && typeof item.replacement === 'number') via.set(item.replacement, item.seq)
+      }
+      return via
+    }
+
+    function isRowHidden(hidden, hiddenVia, seqs) {
       for (const seq of seqs) {
         if (hidden.has(seq)) return true
+        if (hiddenVia !== undefined && hiddenVia.has(seq)) return true
       }
       return false
     }
@@ -721,13 +744,13 @@ window.__ModuleLoader__.load({
           const anchor = anchorKey === undefined ? undefined : snapshot.nodes.get(anchorKey)
           if (anchor !== undefined) {
             const seqs = expandSeqs(seqsFor(anchor), view.edits)
-            setRowHidden(row, isRowHidden(view.hidden, seqs), animate)
+            setRowHidden(row, isRowHidden(view.hidden, view.hiddenVia, seqs), animate)
           }
           continue
         }
         const seqs = expandSeqs(seqsFor(node), view.edits)
         for (const seq of seqs) if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
-        const hidden = isRowHidden(view.hidden, seqs)
+        const hidden = isRowHidden(view.hidden, view.hiddenVia, seqs)
         setRowHidden(row, hidden, animate)
         const target = hidden ? null : liveTarget(targetFor(node), view.edits)
         const covered = target !== null || slotCoversRow(node)

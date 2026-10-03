@@ -31,11 +31,36 @@ const MODES = new Set(['message', 'step', 'reply'])
 
 // The one adapter line that makes a deletion invisible: `dsh-llm-pi-ai` drops a
 // user message whose converted content is empty (the official DeepSeek adapter
-// already does; upstream has not added the pi-ai skip yet). When that line is
-// present, the carrier can be an empty content list and never reaches any
-// model; otherwise it must carry a zero-width space, which every provider
-// accepts. The probe reads the installed adapter once at load; any failure
-// falls back to the safe carrier.
+// already does this natively; upstream has not added the pi-ai skip yet). When
+// that line is present, the carrier can be an empty content list and never
+// reaches any model.
+//
+// Otherwise the carrier MUST carry a zero-width space. An empty content list is
+// not a cheaper alternative, and this was measured rather than assumed: the
+// session append accepts `content: []` (it derives to a user message with no
+// blocks, priced at 4 tokens), but the adapter then hands the provider
+// `{ role: 'user', content: '' }` and the provider refuses the whole request.
+// Probed 2026-10-03 against the provider this repository deploys on
+// (cline-pass -> api.cline.bot -> Vercel deepseek/deepseek-v4.1-flash):
+//
+//   { role: 'user', content: '' }                        -> HTTP 400
+//     {"message":"user message must have content", "type":"invalid_request_error"}
+//   the same shape midway through a conversation         -> HTTP 400, same error
+//   a normal user message through the same route         -> past validation
+//     (fails only because max_tokens:1 produced no text)
+//
+// So the zero-width space is load-bearing, and its ~9 heuristic tokens (4 role
+// framing + 4 block overhead + 1 char) are the price of a deletion every
+// provider will accept. Dropping the character instead of the message is not an
+// option: an empty string is what the provider rejects.
+//
+// A global capability probe cannot relax this either. The flag is decided once
+// at load while the adapter in play depends on the session's provider, so a
+// profile holding both a DeepSeek-adapter provider and an unpatched pi-ai one
+// would write an empty carrier for the latter and break its deletions. The
+// empty carrier is therefore used only when the one adapter this plugin can
+// prove skips it is patched. The probe reads the installed adapter once at
+// load; any failure falls back to the safe carrier.
 const ADAPTER_PATCH_MARKER = 'dsh-delete-turn:skip-empty-user'
 
 function adapterDropsEmptyUserContent() {

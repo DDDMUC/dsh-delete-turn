@@ -355,13 +355,18 @@ function createEnv(options = {}) {
       document.body.appendChild(row)
       return row
     },
-    snapshotFor(rows) {
+    snapshotFor(rows, seqOf) {
       const nodes = new Map()
       for (const row of Array.isArray(rows) ? rows : [rows]) {
-        nodes.set(row.getAttribute('data-chat-flow-key'), {
+        const key = row.getAttribute('data-chat-flow-key')
+        // A row normally names the seq the log appended, but a message another
+        // producer replaced is drawn from its live node - so a caller can pin
+        // that seq and test the mapping in both directions.
+        const seq = seqOf && typeof seqOf[key] === 'number' ? seqOf[key] : 3
+        nodes.set(key, {
           kind: 'user',
-          data: { seq: 3 },
-          anchorSeq: 3,
+          data: { seq },
+          anchorSeq: seq,
         })
       }
       return { nodes }
@@ -522,6 +527,42 @@ test('a row the ledger still holds hidden keeps its own collapse', async () => {
   assert.equal(row.dataset.dshdtHidden, '1')
   assert.equal(row.style.display, 'none')
   assert.equal(row.querySelectorAll('.dshdt-action').length, 0)
+})
+
+// The row of a deleted message names the LIVE node - the deletion carrier this
+// plugin appended - not the seq the log recorded as shadowed. A hide check that
+// consults 'hidden' alone never matches that row, so the deletion succeeds, the
+// model context loses the message, and the row (now drawing the carrier's empty
+// content) stays on screen: the empty bubble a user sees after deleting. The
+// host already publishes the link as 'replacement' on every hidden entry, so the
+// check indexes it and the row collapses like any other.
+test('a deleted row is hidden when the transcript names its replacement carrier', async () => {
+  const payload = { ok: true, hidden: [{ seq: 10, mode: 'message', replacement: 11 }], surface: [11], replyTurns: [], edits: [], markerTurns: [], lastSeq: 11 }
+  const { env, render } = mountOverlay({ payload })
+  const row = env.addRow({ key: 'k1', turn: 1 })
+  const snapshot = env.snapshotFor(row, { k1: 11 })
+
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  assert.equal(row.dataset.dshdtHidden, '1', 'the row naming the carrier is hidden')
+  assert.equal(row.style.display, 'none')
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 0, 'a hidden row offers no action')
+})
+
+test('the same row is still hidden when it names the shadowed seq', async () => {
+  // The other direction, which already worked: the row reports the original.
+  const payload = { ok: true, hidden: [{ seq: 10, mode: 'message', replacement: 11 }], surface: [11], replyTurns: [], edits: [], markerTurns: [], lastSeq: 11 }
+  const { env, render } = mountOverlay({ payload })
+  const row = env.addRow({ key: 'k1', turn: 1 })
+  const snapshot = env.snapshotFor(row, { k1: 10 })
+
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  assert.equal(row.dataset.dshdtHidden, '1', 'the shadowed seq still hides')
 })
 
 test('the turn-navigation mark follows foreign attribution as well', async () => {
