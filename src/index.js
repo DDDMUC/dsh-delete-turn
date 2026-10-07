@@ -5,13 +5,19 @@
 //   GET  /dsh-delete-turn/state?sessionId=<id>
 //   POST /dsh-delete-turn/delete   { sessionId, mode, seq?, messageId?, turn? }
 //
-// A deletion appends ONE empty `system/message` event carrying the official
+// A deletion appends ONE turn-less `user/message` carrier carrying the official
 // surface intent `{ surfaceOp: { op: 'replace', startSeq, endSeq } }` and the
-// complete shadowed-node list in `sourceEventSeqs`. Empty system messages
-// project to no model message, so the addressed content leaves the derived
-// context while the append-only log keeps every original byte. The replacement
-// message source records the deletion mode, which is how the browser half
-// rebuilds its hidden-row ledger after a reload without any private sidecar.
+// complete shadowed-node list in `sourceEventSeqs`. The carrier's content is
+// empty (or one zero-width space, see below), so the addressed content leaves
+// the derived context while the append-only log keeps every original byte. The
+// carrier source names this plugin, which is how the browser half rebuilds its
+// hidden-row ledger after a reload without any private sidecar.
+//
+// The fourth action (`mode: 'splice'`) deletes a WHOLE turn - prompt included -
+// and then replays every later turn after it as fresh copies with new,
+// consecutive turn numbers, so no gap is left where the deleted turn stood. It
+// is the same replacement contract plus an ordinary event replay; the log is
+// still never rewritten.
 //
 // The module imports nothing from the DSH SDK: `sessions`, `sessionQuery` and
 // `sessionController` are resolved through the cordis context at call time, so
@@ -21,13 +27,30 @@ import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
-import { PLUGIN_ID, PlanError, contentEditPairs, deletableReplyTurns, foldSurface, hiddenEntriesOfFold, isBusy, planRange } from './logic.js'
+import {
+  PLUGIN_ID,
+  PlanError,
+  buildSpliceReplayWrites,
+  contentEditPairs,
+  deletableReplyTurns,
+  foldSurface,
+  hiddenEntriesOfFold,
+  isBusy,
+  planRange,
+  planSplice,
+  spliceableSeqs,
+} from './logic.js'
 
 export const name = PLUGIN_ID
 
 const ROUTE_PREFIX = '/dsh-delete-turn'
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MODES = new Set(['message', 'step', 'reply'])
+
+// The fourth action: delete one whole turn and replay every later turn after it
+// under fresh turn numbers. Kept out of MODES so the three original modes are
+// dispatched exactly as before.
+const SPLICE_MODE = 'splice'
 
 // The one adapter line that makes a deletion invisible: `dsh-llm-pi-ai` drops a
 // user message whose converted content is empty (the official DeepSeek adapter
@@ -220,6 +243,10 @@ async function stateOf(ctx, sessionId) {
     // `replyTurns` narrows that to turns with an actually deletable reply.
     surface: surfaceNodes,
     replyTurns: deletableReplyTurns(events, surfaceNodes),
+    // Rows that may offer the turn-delete action. The list is produced by the
+    // SAME window check the route plans with (see spliceableSeqs), so a row
+    // never advertises a splice the host would refuse.
+    spliceSeqs: spliceableSeqs(events, surfaceNodes),
     // In-place rewrites by other producers (dsh-edit-turn): the transcript row
     // stays anchored to the original seq while the context holds the
     // replacement, so the browser half needs the chain to keep the row's
@@ -309,6 +336,183 @@ async function deleteTarget(ctx, sessionId, body) {
     replacementSeq: replacement.seq,
     ...flush,
     hidden: plan.shadowed.map((seq) => ({ seq, mode: plan.mode })),
+  }
+}
+
+// Resolve the live Session AND its agent. A splice writes turns the agent loop
+// never opened, and the loop's idle counter is process-local (see
+// {@link syncLoopTurn}), so the agent handle is needed as well as the append
+// target. An already-open session is used directly; a cold one is resumed
+// through the official controller, exactly what the web UI does on open.
+async function resolveAgentSession(ctx, sessionId) {
+  const live = findLiveSession(ctx, sessionId)
+  let agent
+  const controller = ctx.get('sessionController')
+  if (controller && typeof controller.resolveAgent === 'function') {
+    try {
+      const result = await controller.resolveAgent(sessionId)
+      if (result && result.agent && result.agent.session) {
+        agent = result.agent
+        if (!live) return { session: result.agent.session, agent }
+      }
+    } catch {
+      // fall through: the live session below still carries the append
+    }
+  }
+  if (live) return { session: live, agent }
+  return undefined
+}
+
+/**
+ * Re-point the agent loop's idle turn counter at the log's true last turn.
+ *
+ * Equivalent to dsh-rerun-turn's `syncLoopTurn`. Why it exists: a replay
+ * appends `turn/start` events the loop did not open, while the loop's next turn
+ * is `phase.lastTurn + 1` from its own process-local counter, initialized from
+ * the `turnBoundary` projection only when the agent ATTACHES - an already
+ * attached idle loop never re-reads it. Without this sync the loop's next real
+ * prompt reuses a turn number the replay already consumed and the log fails its
+ * cold read ("turn/start does not open the expected turn"). DSH exposes no
+ * official re-sync API; this is the one place the plugin touches loop state,
+ * guarded and best-effort: an unexpected shape changes nothing and is reported.
+ *
+ * @param agent - the live agent from `sessionController.resolveAgent`.
+ * @param maxTurn - the highest turn number the log now contains.
+ * @returns 'synced' | 'already-current' | 'unavailable'.
+ */
+export function syncLoopTurn(agent, maxTurn) {
+  try {
+    const phase = agent && agent.phase
+    if (!phase || typeof phase !== 'object' || typeof phase.lastTurn !== 'number' || phase.kind !== 'idle') {
+      return 'unavailable'
+    }
+    if (maxTurn > phase.lastTurn) {
+      phase.lastTurn = maxTurn
+      return 'synced'
+    }
+    return 'already-current'
+  } catch {
+    return 'unavailable'
+  }
+}
+
+// The splice: one whole-turn delete plus a faithful replay of the tail.
+//
+// Writes, in order:
+//   1. the turn-less carrier replacement over the whole window (the deleted
+//      turn plus every later turn's surface nodes), so nothing the replay is
+//      about to reproduce stays behind twice;
+//   2. the replay writes from {@link buildSpliceReplayWrites} - ordinary
+//      appends with fresh turn numbers, fresh ids and remapped sources.
+//
+// Every write goes through the live Session's own append boundary, and the
+// result is proven against the real format validator by the contract test and
+// tools/verify-real-session.mjs.
+async function spliceTarget(ctx, sessionId, body) {
+  const resolved = await resolveAgentSession(ctx, sessionId)
+  const session = resolved && resolved.session
+  if (!session || typeof session.append !== 'function') {
+    throw new HttpError(409, 'session-not-active', 'the session is not open in DSH')
+  }
+  const events = await readEvents(ctx, sessionId)
+  if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
+  if (isBusy(events)) throw new HttpError(409, 'busy', 'the session is still working')
+
+  const surfaceNodes = surfaceOf(ctx, sessionId, events)
+  let plan
+  try {
+    plan = planSplice(events, surfaceNodes, {
+      seq: typeof body.seq === 'number' ? body.seq : undefined,
+      messageId: typeof body.messageId === 'string' ? body.messageId : undefined,
+      turn: typeof body.turn === 'number' ? body.turn : undefined,
+    })
+  } catch (error) {
+    if (error instanceof PlanError) {
+      const status = error.code === 'not-deletable' ? 400 : 409
+      throw new HttpError(status, error.code, error.message)
+    }
+    throw error
+  }
+
+  // The live surface is the append authority; a node that vanished between the
+  // read and this check means another writer landed first.
+  for (const seq of plan.shadowed) {
+    if (!surfaceNodes.includes(seq)) throw new HttpError(409, 'stale', 'the session changed, retry')
+  }
+
+  const spliceId = randomUUID()
+  let carrier
+  try {
+    carrier = session.append(
+      'user/message',
+      {
+        id: randomUUID(),
+        role: 'user',
+        content: SILENT_CARRIER ? [] : [{ type: 'text', text: '\u200b' }],
+        source: {
+          kind: `plugin:${PLUGIN_ID}`,
+          spliceBy: PLUGIN_ID,
+          spliceId,
+          deletedTurn: plan.turn,
+          baseTurn: plan.baseTurn,
+          replayTurns: plan.replayTurns,
+        },
+      },
+      {
+        surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+        sourceEventSeqs: plan.shadowed,
+      },
+    )
+  } catch (error) {
+    throw new HttpError(409, 'stale', `the surface refused the replacement: ${String((error && error.message) || error)}`)
+  }
+
+  // The copies are addressed by predicted seq: appends land back to back and no
+  // other writer can interleave inside this synchronous block. The guard below
+  // makes a concurrent writer visible instead of silently mis-numbing a source.
+  const startSeq = session.seq
+  const writes = buildSpliceReplayWrites(events, plan, spliceId, startSeq)
+  const appended = []
+  try {
+    for (let index = 0; index < writes.length; index += 1) {
+      const write = writes[index]
+      if (typeof session.seq === 'number' && session.seq !== startSeq + index) {
+        throw new HttpError(409, 'stale', `the log moved: expected seq ${startSeq + index}, found ${session.seq}`)
+      }
+      const opts =
+        write.surfaceOp === undefined
+          ? []
+          : [{ surfaceOp: write.surfaceOp, ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }) }]
+      appended.push(session.append(write.type, write.data, ...opts))
+    }
+  } catch (error) {
+    // The carrier is already committed: persist what landed and report the
+    // partial state instead of pretending nothing happened.
+    await flushSession(ctx, session)
+    if (error instanceof HttpError) throw error
+    throw new HttpError(409, 'stale', `the replay was refused: ${String((error && error.message) || error)}`)
+  }
+
+  // The replay wrote turns the loop never opened; re-point its idle counter
+  // SYNCHRONOUSLY (same tick as the appends, before any await) so its next
+  // prompt opens the correct number instead of colliding.
+  const maxTurn = writes.reduce((max, write) => {
+    const turn = write.data && typeof write.data.turn === 'number' ? write.data.turn : 0
+    return turn > max ? turn : max
+  }, 0)
+  const sync = syncLoopTurn(resolved.agent, maxTurn)
+  const flush = await flushSession(ctx, session)
+
+  return {
+    replacementSeq: carrier.seq,
+    spliceId,
+    ...flush,
+    deletedTurn: plan.turn,
+    baseTurn: plan.baseTurn,
+    replayed: appended.length,
+    replayTurns: plan.replayTurns,
+    sync,
+    hidden: plan.shadowed.map((seq) => ({ seq, mode: SPLICE_MODE })),
   }
 }
 
@@ -436,7 +640,12 @@ export function apply(ctx) {
           }
           try {
             const sessionId = requireSessionId(typeof body.sessionId === 'string' ? body.sessionId.trim() : '')
-            const result = await deleteTarget(ctx, sessionId, body)
+            // The splice is a different operation (carrier + replay), not a
+            // fourth range; the three original modes keep their exact path.
+            const result =
+              (typeof body.mode === 'string' ? body.mode : '') === SPLICE_MODE
+                ? await spliceTarget(ctx, sessionId, body)
+                : await deleteTarget(ctx, sessionId, body)
             sendJson(res, 200, { ok: true, ...result })
           } catch (error) {
             const status = error instanceof HttpError ? error.status : 500

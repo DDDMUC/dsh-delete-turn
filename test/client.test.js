@@ -818,3 +818,113 @@ test('the client half keeps relative routes and no web-only surface', async () =
   assert.doesNotMatch(SOURCE, /showPopover|showModal\(|<dialog/)
   assert.doesNotMatch(SOURCE, /__DSH_BOOT__/)
 })
+
+// --- the turn-delete entry (mode splice) ------------------------------------
+
+const SPLICE_PAYLOAD = { ok: true, hidden: [], surface: [3], spliceSeqs: [3], replyTurns: [], edits: [], markerTurns: [], lastSeq: 3 }
+
+function click(button) {
+  button.onclick({ preventDefault() {}, stopPropagation() {} })
+}
+
+test('an advertised prompt offers the turn-delete beside the delete action', async () => {
+  const { env, render, controller } = mountOverlay({ payload: SPLICE_PAYLOAD })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  // The state arrives asynchronously and the overlay re-applies on publish, the
+  // same second pass the real client runs when the controller publishes.
+  render(snapshot)
+
+  // The trash action's own contract is untouched: one host, one row button.
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'still exactly one injected host')
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1, 'still exactly one trash button')
+  assert.equal(row.getAttribute('data-dshdt-splice'), '1', 'the row declares the second entry')
+  const splice = row.querySelectorAll('.dshdt-splice')
+  assert.equal(splice.length, 1, 'one turn-delete button, inside the same host')
+  assert.equal(splice[0].getAttribute('aria-label'), '删除这一轮并接上后面')
+  assert.equal(splice[0].parentElement, row.querySelectorAll('.dshdt-action-host')[0], 'it rides in the row host')
+
+  click(splice[0])
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'splice', seq: 3, label: 'splice' })
+  click(row.querySelectorAll('.dshdt-action')[0])
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'message', seq: 3, label: 'message' }, 'the trash action keeps its own mode')
+})
+
+test('a row the host does not advertise carries no turn-delete entry', async () => {
+  // The default payload advertises no spliceable row: the button exists in the
+  // host (adoption is cheap and idempotent) but the row never offers it.
+  const { env, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  render(env.snapshotFor(row))
+  await env.settle()
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1)
+  assert.equal(row.hasAttribute('data-dshdt-splice'), false)
+})
+
+test('a context row never anchors a turn delete, even when its seq is listed', async () => {
+  const { env, render } = mountOverlay({ payload: SPLICE_PAYLOAD })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = { nodes: new Map([['k1', { kind: 'context', data: { seq: 3 }, anchorSeq: 3 }]]) }
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1, 'the context row still offers its own delete')
+  assert.equal(row.getAttribute('data-dshdt-splice'), null)
+})
+
+test('a hidden row offers neither action', async () => {
+  const payload = { ...SPLICE_PAYLOAD, hidden: [{ seq: 3, mode: 'splice', replacement: 9 }] }
+  const { env, render } = mountOverlay({ payload })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 0, 'the whole host leaves a hidden row')
+  assert.equal(row.hasAttribute('data-dshdt-splice'), false)
+})
+
+test('a re-apply round leaves exactly one turn-delete button', async () => {
+  const document = new StubDocument()
+  const first = mountOverlay({ document, payload: SPLICE_PAYLOAD })
+  const row = first.env.addRow({ key: 'k1', turn: 1, actions: true })
+  first.render(first.env.snapshotFor(row))
+  await first.env.settle()
+  assert.equal(row.querySelectorAll('.dshdt-splice').length, 1)
+  first.env.dispose()
+  // A dispose sweeps the whole injected host - both buttons leave together.
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 0)
+  assert.equal(row.querySelectorAll('.dshdt-splice').length, 0)
+
+  const second = mountOverlay({ document, payload: SPLICE_PAYLOAD })
+  second.render(second.env.snapshotFor(row))
+  await second.env.settle()
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'one host came back')
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1)
+  assert.equal(row.querySelectorAll('.dshdt-splice').length, 1, 'no ghost turn-delete button')
+})
+
+test('a second live instance adopts the turn-delete button inside the existing host', async () => {
+  const document = new StubDocument()
+  const first = mountOverlay({ document, payload: SPLICE_PAYLOAD })
+  const row = first.env.addRow({ key: 'k1', turn: 1, actions: true })
+  first.render(first.env.snapshotFor(row))
+  await first.env.settle()
+  const host = row.querySelectorAll('.dshdt-action-host')[0]
+  const splice = row.querySelectorAll('.dshdt-splice')[0]
+
+  const second = mountOverlay({ document, payload: SPLICE_PAYLOAD })
+  const snapshot = second.env.snapshotFor(row)
+  second.render(snapshot)
+  await second.env.settle()
+  second.render(snapshot)
+
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'no ghost host is stacked')
+  assert.equal(row.querySelectorAll('.dshdt-action-host')[0], host, 'the existing host node is adopted')
+  assert.equal(row.querySelectorAll('.dshdt-splice').length, 1)
+  assert.equal(row.querySelectorAll('.dshdt-splice')[0], splice, 'the existing turn-delete button is adopted')
+  click(splice)
+  assert.equal(second.controller.getSnapshot().dialog.mode, 'splice', 'the adopted button is rewired to this instance')
+})
