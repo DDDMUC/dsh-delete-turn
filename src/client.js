@@ -35,6 +35,65 @@ window.__ModuleLoader__.load({
     // Minimum gap between automatic snapshot refreshes while a transcript grows.
     const REFRESH_INTERVAL_MS = 3000
 
+    // --- preferences ----------------------------------------------------------
+    //
+    // One client-side preference: whether a deletion opens the confirmation
+    // dialog first. It lives in localStorage - the same store the official
+    // client plugins keep their view options in - so it survives reloads with no
+    // host round-trip, and a subscription keeps the settings page and the delete
+    // paths on one value.
+
+    const PREFS_KEY = 'dsh-delete-turn:prefs'
+    const DEFAULT_ASK = true
+
+    function readStoredAsk() {
+      try {
+        if (typeof window === 'undefined' || !window.localStorage) return DEFAULT_ASK
+        const raw = window.localStorage.getItem(PREFS_KEY)
+        if (raw === null) return DEFAULT_ASK
+        const parsed = JSON.parse(raw)
+        return parsed && typeof parsed.ask === 'boolean' ? parsed.ask : DEFAULT_ASK
+      } catch {
+        // A missing or malformed entry falls back to the shipped default rather
+        // than breaking the host: the dialog path is the safe behaviour.
+        return DEFAULT_ASK
+      }
+    }
+
+    let askBeforeDelete = readStoredAsk()
+    const prefListeners = new Set()
+
+    function getPrefs() {
+      return { ask: askBeforeDelete }
+    }
+
+    function setAskBeforeDelete(value) {
+      const ask = value === true
+      if (askBeforeDelete === ask) return
+      askBeforeDelete = ask
+      try {
+        if (typeof window !== 'undefined' && window.localStorage) {
+          window.localStorage.setItem(PREFS_KEY, JSON.stringify({ ask }))
+        }
+      } catch {
+        // Storage that refuses writes (private mode) must not break the toggle.
+      }
+      for (const listener of prefListeners) {
+        try {
+          listener()
+        } catch (error) {
+          console.error('[dsh-delete-turn] preference subscriber threw:', error)
+        }
+      }
+    }
+
+    function subscribePrefs(listener) {
+      prefListeners.add(listener)
+      return () => {
+        prefListeners.delete(listener)
+      }
+    }
+
     // --- copy -----------------------------------------------------------------
 
     const zh = {
@@ -55,6 +114,11 @@ window.__ModuleLoader__.load({
       'dialog.confirm': '删除',
       'dialog.pending': '删除中…',
       'dialog.retry': '重试',
+      'config.ask': '删除时询问',
+      'config.hint.ask': '每次删除前都会弹出确认框。',
+      'config.hint.auto': '删除会直接执行，不再询问。',
+      'config.summary.ask': '删除前询问',
+      'config.summary.auto': '直接删除',
       'error.invalid': '请求无效，请刷新后重试。',
       'error.session-not-active': '这个会话当前未激活，请先打开该会话再删除。',
       'error.session-not-found': '找不到该会话的日志。',
@@ -86,6 +150,11 @@ window.__ModuleLoader__.load({
       'dialog.confirm': 'Delete',
       'dialog.pending': 'Deleting...',
       'dialog.retry': 'Retry',
+      'config.ask': 'Ask before deleting',
+      'config.hint.ask': 'Show a confirmation dialog before every deletion.',
+      'config.hint.auto': 'Delete right away without asking.',
+      'config.summary.ask': 'Ask before deleting',
+      'config.summary.auto': 'Delete without asking',
       'error.invalid': 'Invalid request; refresh and try again.',
       'error.session-not-active': 'This session is not open in DSH; open it first.',
       'error.session-not-found': 'No session log was found for this id.',
@@ -130,6 +199,8 @@ window.__ModuleLoader__.load({
       '.dshdt-dialog-text{margin:0;color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:22px}',
       '.dshdt-dialog-note{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
       '.dshdt-dialog-error{margin:10px 0 0;color:var(--dsw-alias-state-error-primary,#d54941);font-size:13px;line-height:20px}',
+      '.dshdt-config{display:flex;flex-direction:column;gap:8px}',
+      '.dshdt-config-hint{margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
       '.dshdt-danger{background:var(--dsw-alias-state-error-primary,#d54941)!important;color:var(--dsw-alias-label-primary-foreground,#fff)!important}',
       '@media (prefers-reduced-motion:reduce){.dshdt-collapsing{transition:none}.dshdt-floating{transition:none}}',
     ].join('')
@@ -309,8 +380,25 @@ window.__ModuleLoader__.load({
       }
 
       async confirm() {
-        const requested = this.view.dialog
-        if (requested === null || this.view.pending) return
+        await this.perform(this.view.dialog)
+      }
+
+      // The entry every action uses. With "ask" on, it opens the confirmation
+      // dialog as before. With it off, it deletes straight away - and since a
+      // silent failure would have nowhere to surface, a failed attempt opens the
+      // dialog carrying its error so the user can retry or cancel.
+      async trigger(target) {
+        if (target === null || target === undefined || this.view.pending) return
+        if (getPrefs().ask) {
+          this.open(target)
+          return
+        }
+        const result = await this.perform(target)
+        if (result.failure !== null) this.publish({ dialog: target, pending: false, failure: result.failure })
+      }
+
+      async perform(requested) {
+        if (requested === null || this.view.pending) return { failure: null }
         this.publish({ pending: true, failure: null })
         try {
           // The live node can move while the dialog sits open: another producer
@@ -331,7 +419,7 @@ window.__ModuleLoader__.load({
           }
           if (!result.ok) {
             this.publish({ pending: false, failure: result.code })
-            return
+            return { failure: result.code }
           }
           const data = result.data
           const hidden = new Map(this.view.hidden)
@@ -342,8 +430,10 @@ window.__ModuleLoader__.load({
           for (const [via, seq] of hiddenViaOf(data.hidden)) hiddenVia.set(via, seq)
           this.animateOnce = true
           this.publish({ pending: false, dialog: null, hidden, hiddenVia, loaded: true, loadError: false })
+          return { failure: null }
         } catch {
           this.publish({ pending: false, failure: 'generic' })
+          return { failure: 'generic' }
         }
       }
 
@@ -710,7 +800,7 @@ window.__ModuleLoader__.load({
       button.onclick = (event) => {
         event.preventDefault()
         event.stopPropagation()
-        controller.open(target)
+        controller.trigger(target)
       }
       // The second action is wired only where a splice target exists (and stays
       // hidden by the row attribute otherwise), so a row can never offer an
@@ -727,7 +817,7 @@ window.__ModuleLoader__.load({
             : (event) => {
                 event.preventDefault()
                 event.stopPropagation()
-                controller.open(spliceTarget)
+                controller.trigger(spliceTarget)
               }
       }
       const anchor = node.kind === 'user' || node.kind === 'steering' ? row.querySelector('[class*="_actions"]') : null
@@ -769,7 +859,7 @@ window.__ModuleLoader__.load({
       button.onclick = (event) => {
         event.preventDefault()
         event.stopPropagation()
-        controller.open(target)
+        controller.trigger(target)
       }
       if (host.parentElement !== think) think.appendChild(host)
     }
@@ -916,7 +1006,7 @@ window.__ModuleLoader__.load({
         'aria-label': label,
         title: label,
         disabled: view.pending,
-        onClick: () => controller.open({ mode: 'reply', messageId }),
+        onClick: () => controller.trigger({ mode: 'reply', messageId }),
         children: jsx(TrashIcon, {}),
       })
     }
@@ -958,6 +1048,27 @@ window.__ModuleLoader__.load({
               : jsx('p', { className: 'dshdt-dialog-error', role: 'status', children: t(`error.${failure}`) }),
           ],
         }),
+      })
+    }
+
+    // The plugin page entry (the component row's "configure" arrow, slot
+    // `plugins.row.config`, key `<bundle>#<row id>`). It renders the row's
+    // one-liner for the manager's summary slot and the toggle card for the page.
+    function AskBeforeDeleteOption({ view, t }) {
+      const tr = typeof t === 'function' ? t : (key) => key
+      const [ask, setAsk] = react.useState(getPrefs().ask)
+      react.useEffect(() => subscribePrefs(() => setAsk(getPrefs().ask)), [])
+      if (view === 'summary') return tr(ask ? 'config.summary.ask' : 'config.summary.auto')
+      return jsxs('div', {
+        className: 'dshdt-config',
+        children: [
+          jsx(primitives.Checkbox, {
+            checked: ask,
+            label: tr('config.ask'),
+            onChange: (checked) => setAskBeforeDelete(checked),
+          }),
+          jsx('p', { className: 'dshdt-config-hint', children: tr(ask ? 'config.hint.ask' : 'config.hint.auto') }),
+        ],
       })
     }
 
@@ -1053,6 +1164,21 @@ window.__ModuleLoader__.load({
             inject: (sessionId) => ({ hooks: { deletion: controllerFor(sessionId) }, controller: controllerFor(sessionId) }),
           },
           OverlayEntry,
+        ),
+      )
+
+      // The plugin's own page in the manager: the row this bundle inserts
+      // (`cordis.patch.yml`, id `dsh-delete-turn`) gains a configure arrow that
+      // opens this card. The key is `<bundle package>#<row id>`, the contract of
+      // ui-plugin-manager's rowConfigKey.
+      ctx.slots.inject('plugins.row.config', () =>
+        ctx.slots.register(
+          {
+            name: 'plugins.row.config',
+            key: 'dsh-delete-turn#dsh-delete-turn',
+            locale: NS,
+          },
+          AskBeforeDeleteOption,
         ),
       )
     }

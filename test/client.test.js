@@ -313,12 +313,17 @@ function createEnv(options = {}) {
       const cleanup = effect()
       if (typeof cleanup === 'function') state.cleanups.push(cleanup)
     },
+    // Enough for a one-shot render: the settings card's toggle writes through
+    // the store itself, so a re-render is not needed to observe the change.
+    useState(initial) {
+      return [initial, () => {}]
+    },
   }
   const jsx = (type, props) => ({ type, props })
   const requireStub = (id) => {
     if (id === 'react') return react
     if (id === 'react/jsx-runtime') return { jsx, jsxs: jsx, Fragment: Symbol('Fragment') }
-    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { Modal: jsx, Button: jsx }
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return { Modal: jsx, Button: jsx, Checkbox: jsx }
     throw new Error('unexpected client require: ' + id)
   }
   const factory = new Function(
@@ -927,4 +932,72 @@ test('a second live instance adopts the turn-delete button inside the existing h
   assert.equal(row.querySelectorAll('.dshdt-splice')[0], splice, 'the existing turn-delete button is adopted')
   click(splice)
   assert.equal(second.controller.getSnapshot().dialog.mode, 'splice', 'the adopted button is rewired to this instance')
+})
+
+// --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
+
+function rowConfigEntry(env) {
+  for (const entry of env.components.values()) {
+    if (entry.spec.name === 'plugins.row.config') return entry
+  }
+  return undefined
+}
+
+function deleteCallCount(env) {
+  return env.state.fetchCalls.filter((call) => call.url.indexOf('/dsh-delete-turn/delete') !== -1).length
+}
+
+test('the plugin page registers a row.config entry under the bundle#row key', () => {
+  const env = mount()
+  const entry = rowConfigEntry(env)
+  assert.ok(entry, 'the settings page must register a plugins.row.config entry')
+  assert.equal(entry.spec.key, 'dsh-delete-turn#dsh-delete-turn', 'the key is <bundle>#<row id>')
+})
+
+test('the row.config summary reports the current ask state', () => {
+  const env = mount()
+  const entry = rowConfigEntry(env)
+  const dict = env.locales.get('dsh-delete-turn')
+  const t = (key) => (dict && dict.zh[key]) || key
+  assert.equal(entry.Component({ view: 'summary', t }), '删除前询问')
+})
+
+test('with asking on (the default) a click only opens the dialog', async () => {
+  const { env, controller, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  const before = deleteCallCount(env)
+  click(row.querySelectorAll('.dshdt-action')[0])
+  await env.settle()
+
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'message', seq: 3, label: 'message' })
+  assert.equal(deleteCallCount(env), before, 'nothing is deleted until the dialog is confirmed')
+})
+
+test('unticking the checkbox deletes straight away without a dialog', async () => {
+  const { env, controller, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  // Open the plugin page and untick "ask before deleting".
+  const entry = rowConfigEntry(env)
+  const dict = env.locales.get('dsh-delete-turn')
+  const t = (key) => (dict && dict.zh[key]) || key
+  const tree = entry.Component({ view: 'page', t })
+  tree.props.children[0].props.onChange(false)
+
+  const before = deleteCallCount(env)
+  click(row.querySelectorAll('.dshdt-action')[0])
+  await env.settle()
+  await env.settle()
+
+  assert.equal(controller.getSnapshot().dialog, null, 'no dialog is opened while asking is off')
+  assert.equal(deleteCallCount(env), before + 1, 'the delete is issued straight away')
 })
