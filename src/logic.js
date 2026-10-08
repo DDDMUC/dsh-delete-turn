@@ -4,10 +4,10 @@
 // host's public sessionQuery service, so the module has no DSH SDK imports and
 // runs unchanged under `node --test`. The two central pieces are the official
 // surface fold (which nodes the model currently sees, and which earlier nodes a
-// replacement shadowed), the range planner that turns one UI target into a
-// canonical, contiguous surface-replace range, and the splice planner that
-// deletes a whole turn and replays every later turn after it with fresh,
-// consecutive turn numbers (the only numbering the session format accepts).
+// replacement shadowed) and the range planner that turns one UI target into a
+// canonical, contiguous surface-replace range. A whole-turn delete is just the
+// widest range: every live surface node of the addressed turn, replaced by one
+// turn-less carrier - no replay, no renumbering, one append.
 //
 // The only import is the platform's own id generator: a replay copy must carry
 // a FRESH message id, never the id of the message it copies.
@@ -196,6 +196,9 @@ export function inferMode(bySeq, shadowed) {
     const step = members[0].data && members[0].data.step
     if (members.every((event) => event.data && event.data.turn === turn && event.data.step === step)) return 'step'
   }
+  // A window that carries the turn's own human prompt - and is not the single
+  // message shape above - is a whole-turn delete.
+  if (members.some((event) => event.type === 'user/message' && event.data && event.data.source && event.data.source.kind === 'user')) return 'turn'
   return 'reply'
 }
 
@@ -456,6 +459,51 @@ export function planRange(events, surfaceNodes, request) {
     }
   }
 
+  // turn: every live surface node of the addressed turn - the human prompt, its
+  // injected context and its whole reply - in ONE range replace. The turn
+  // disappears from the model context and the later turns stay exactly where
+  // they are; nothing is replayed or renumbered (a plain range replace is all
+  // the official surface contract requires).
+  if (mode === 'turn') {
+    const turn = target.data && typeof target.data.turn === 'number' ? target.data.turn : turnOf.get(targetSeq)
+    if (typeof turn !== 'number') throw new PlanError('not-deletable', 'the target does not belong to a turn')
+    // Surface node 0 is the system prompt head, appended inside the first step of
+    // the first turn. That turn may not be removed as a whole: the head is the
+    // one node the official append contract lets nothing but a system/message
+    // rewrite, and the head must stay the head.
+    const head = bySeq.get(surfaceNodes[0])
+    const headTurn = head ? (head.data && typeof head.data.turn === 'number' ? head.data.turn : turnOf.get(surfaceNodes[0])) : undefined
+    if (headTurn === turn) throw new PlanError('not-deletable', 'the turn holding the system prompt head cannot be deleted')
+    const members = []
+    for (const seq of surfaceNodes) {
+      const event = bySeq.get(seq)
+      // The system prompt head is never reply content (reply mode makes the same
+      // exclusion), and it is guarded above.
+      if (!event || event.type === 'system/message') continue
+      const eventTurn = event.data && typeof event.data.turn === 'number' ? event.data.turn : turnOf.get(seq)
+      if (eventTurn !== turn) continue
+      members.push(seq)
+    }
+    if (members.length === 0) throw new PlanError('nothing-to-delete', 'the turn has no surface content left')
+    const startIdx = nodeIndex.get(members[0])
+    const endIdx = nodeIndex.get(members[members.length - 1])
+    const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
+    if (shadowed.some((seq) => !members.includes(seq) && !isOwnPlaceholder(bySeq.get(seq)) && !isSilentPluginCarrier(bySeq.get(seq)))) {
+      throw new PlanError('range-not-clean', 'the turn window contains unrelated surface nodes')
+    }
+    const closing = bySeq.get(members[members.length - 1])
+    const step = closing && closing.type === 'assistant/message' && typeof closing.data.step === 'number' ? closing.data.step : 0
+    return {
+      mode,
+      targetSeq,
+      startSeq: shadowed[0],
+      endSeq: shadowed[shadowed.length - 1],
+      shadowed,
+      turn,
+      step,
+    }
+  }
+
   throw new PlanError('not-deletable', `unsupported mode ${String(mode)}`)
 }
 // --- target resolution -------------------------------------------------------
@@ -486,7 +534,7 @@ function resolveTargetSeq(events, surfaceNodes, request, mode) {
       }
     }
   }
-  if (targetSeq === undefined && (mode === 'reply' || mode === 'splice') && typeof request.turn === 'number') {
+  if (targetSeq === undefined && (mode === 'reply' || mode === 'turn') && typeof request.turn === 'number') {
     const bySeq = new Map(events.map((event) => [event.seq, event]))
     const turnOf = turnIndex(events)
     for (let index = surfaceNodes.length - 1; index >= 0; index -= 1) {
@@ -541,552 +589,30 @@ export function isSilentPluginCarrier(event) {
 }
 
 /**
- * Every closed turn bracket in the log, keyed by turn number.
- *
- * A turn number can be opened more than once in logs written by older builds
- * (a replay that reused the loop's counter), so the value is a list in log
- * order. Brackets left open by an unterminated turn keep `endSeq: null` and
- * never take part in a plan.
- *
- * @param events - complete contiguous raw event log.
- * @returns turn -> `[{ startSeq, endSeq }]`.
- */
-export function turnBrackets(events) {
-  const out = new Map()
-  let open = null
-  for (const event of events) {
-    if (event.type === 'turn/start') {
-      const turn = event.data && event.data.turn
-      open = typeof turn === 'number' ? { turn, startSeq: event.seq, endSeq: null } : null
-      if (open !== null) {
-        const list = out.get(turn) ?? []
-        list.push(open)
-        out.set(turn, list)
-      }
-      continue
-    }
-    if (event.type === 'turn/end') {
-      if (open !== null && event.data && event.data.turn === open.turn) open.endSeq = event.seq
-      open = null
-    }
-  }
-  return out
-}
-
-/**
- * The highest turn number the log has opened.
- * @param events - complete contiguous raw event log.
- * @returns the max `turn/start` turn, or 0 when the log has no turn.
- */
-export function lastTurnOf(events) {
-  let last = 0
-  for (const event of events) {
-    if (event.type === 'turn/start' && event.data && typeof event.data.turn === 'number' && event.data.turn > last) {
-      last = event.data.turn
-    }
-  }
-  return last
-}
-
-/**
- * The turn number the next `turn/start` must carry.
- *
- * This is the format's own rule, not an inference: the v4 relationship
- * validator (`dsh-session-format-v3-to-v4`, "turn/start does not open the
- * expected turn") starts `nextTurn` at 1 and advances it once per `turn/end`.
- * A replayed turn therefore cannot reuse an original number - it takes the next
- * one after the log's last closed turn, which is why a splice renumbers its
- * copies instead of pretending the numbering was rearranged.
- *
- * @param events - complete contiguous raw event log.
- * @returns the next accepted turn number.
- */
-export function nextTurnOf(events) {
-  let closed = 0
-  for (const event of events) if (event.type === 'turn/end') closed += 1
-  return closed + 1
-}
-
-// --- splice planner ----------------------------------------------------------
-
-/**
- * Plan a SPLICE: delete one whole turn and replay every later turn after it.
- *
- * The window starts at the addressed turn's first surface node (its human
- * prompt, injected context or reply content) and runs to the LAST surface node
- * of the log, so no node of any later turn stays behind. The carrier that lands
- * in that position is turn-less and content-free, and the later turns are
- * re-appended as fresh copies with new, consecutive turn numbers - which is the
- * only numbering the format accepts (see {@link nextTurnOf}).
- *
- * Nodes belonging to a replayed turn travel; a system message inside the tail
- * does not (the loop owns the system prompt and re-injects it - the same rule
- * dsh-rerun-turn's replay follows), and neither does this plugin's own
- * placeholder or any other plugin's silent carrier. Anything else inside the
- * window - a node that belongs to no replayed turn - refuses the plan, so a
- * splice can never silently retire content the user did not aim at.
- *
- * @param events - complete contiguous raw event log.
- * @param surfaceNodes - current surface seqs in model order.
- * @param request - `{ seq?, messageId?, turn? }`.
- * @returns `{ mode, targetSeq, startSeq, endSeq, shadowed, turn, replay,
- *   replayTurns, baseTurn, logFrom, logTo }`, where `replay` carries one entry
- *   per replayed turn (`{ turn, startSeq, endSeq, shadowed }`).
- * @throws {PlanError} with a stable code when the splice cannot be planned.
- */
-/**
- * The shared lookups one splice planning pass needs.
- *
- * Built once so that advertising (which rows may offer the action) and planning
- * (what the route accepts) can run the SAME checks instead of two similar ones:
- * `spliceableSeqs` and `planSplice` both go through {@link spliceWindow}.
- *
- * @param events - complete contiguous raw event log.
- * @param surfaceNodes - current surface seqs in model order.
- * @returns the context object {@link spliceWindow} consumes.
- */
-export function spliceContext(events, surfaceNodes) {
-  const bySeq = new Map(events.map((event) => [event.seq, event]))
-  const turnOf = turnIndex(events)
-  const firstIdxOf = new Map()
-  let badOrphan = -1
-  for (let index = 0; index < surfaceNodes.length; index += 1) {
-    const event = bySeq.get(surfaceNodes[index])
-    if (event === undefined) continue
-    const nodeTurn = turnOfSeq(bySeq, turnOf, surfaceNodes[index])
-    if (typeof nodeTurn === 'number') {
-      if (!firstIdxOf.has(nodeTurn)) firstIdxOf.set(nodeTurn, index)
-      continue
-    }
-    // A turn-less node that is neither this plugin's placeholder nor a silent
-    // carrier cannot be reproduced by a replay; its index is the earliest point
-    // a window may not start before.
-    if (badOrphan === -1 && !isOwnPlaceholder(event) && !isSilentPluginCarrier(event)) badOrphan = index
-  }
-  return {
-    surfaceNodes,
-    bySeq,
-    turnOf,
-    brackets: turnBrackets(events),
-    firstIdxOf,
-    badOrphan,
-    baseTurn: nextTurnOf(events),
-    lastTurn: lastTurnOf(events),
-  }
-}
-
-/**
- * The replacement window and replay one addressed surface node plans.
- * @param context - result of {@link spliceContext}.
- * @param targetSeq - the addressed surface node.
- * @returns `{ targetSeq, shadowed, turn, replay, baseTurn }`.
- * @throws {PlanError} with a stable code when the splice cannot be planned.
- */
-export function spliceWindow(context, targetSeq) {
-  const { surfaceNodes, bySeq, turnOf, brackets, firstIdxOf, badOrphan, baseTurn, lastTurn } = context
-  const target = bySeq.get(targetSeq)
-  if (!target) throw new PlanError('not-deletable', 'target event not found')
-  if (targetSeq === surfaceNodes[0]) throw new PlanError('not-deletable', 'the system prompt head cannot be deleted')
-  if (target.type === 'system/message') throw new PlanError('not-deletable', 'the system prompt cannot be deleted')
-
-  const turn = turnOfSeq(bySeq, turnOf, targetSeq)
-  if (typeof turn !== 'number') throw new PlanError('not-deletable', 'the target does not belong to a turn')
-
-  const firstIdx = firstIdxOf.get(turn)
-  if (firstIdx === undefined) throw new PlanError('nothing-to-delete', 'the turn has no surface content left')
-  // Node 0 is the protected system prompt head: a replacement covering it must
-  // itself be a system/message over exactly that node, which a splice carrier
-  // never is. The first turn therefore cannot be spliced.
-  if (firstIdx === 0) throw new PlanError('not-deletable', 'the turn holding the system prompt head cannot be spliced')
-  if (badOrphan !== -1 && badOrphan > firstIdx) {
-    throw new PlanError('range-not-clean', 'the window contains a node that belongs to no replayed turn')
-  }
-  if (lastTurn + 1 !== baseTurn) throw new PlanError('range-not-clean', 'the log turn numbering is not contiguous')
-
-  const shadowed = surfaceNodes.slice(firstIdx)
-  const membersOfTurn = new Map()
-  for (const seq of shadowed) {
-    const event = bySeq.get(seq)
-    if (!event) throw new PlanError('range-not-clean', 'the window names an event the log does not hold')
-    const nodeTurn = turnOfSeq(bySeq, turnOf, seq)
-    if (nodeTurn === turn) continue
-    if (typeof nodeTurn === 'number' && nodeTurn > turn) {
-      // A system message is loop-owned machinery rather than conversation, so
-      // it is retired without a copy (dsh-rerun-turn's replay rule).
-      if (event.type === 'system/message') continue
-      const list = membersOfTurn.get(nodeTurn) ?? []
-      list.push(seq)
-      membersOfTurn.set(nodeTurn, list)
-      continue
-    }
-    // Turn-less node: only a carrier that produces no conversation content may
-    // ride along in the window.
-    if (!isOwnPlaceholder(event) && !isSilentPluginCarrier(event)) {
-      throw new PlanError('range-not-clean', 'the window contains a node that belongs to no replayed turn')
-    }
-  }
-
-  const replay = []
-  for (const nodeTurn of [...membersOfTurn.keys()].sort((a, b) => a - b)) {
-    const owned = membersOfTurn.get(nodeTurn)
-    const closed = (brackets.get(nodeTurn) ?? []).filter((bracket) => bracket.endSeq !== null)
-    // A turn number opened more than once (older builds' replays): the bracket
-    // holding the turn's live content is the one whose span covers the most of
-    // it. Every live node must sit inside that one bracket, or the replay would
-    // copy a step event outside an open turn.
-    let owner = null
-    let best = 0
-    for (const bracket of closed) {
-      const held = owned.filter((seq) => seq >= bracket.startSeq && seq <= bracket.endSeq).length
-      if (held > best) {
-        best = held
-        owner = bracket
-      }
-    }
-    if (owner === null || best !== owned.length) {
-      throw new PlanError('range-not-clean', 'turn ' + String(nodeTurn) + ' has no single closed bracket holding its live content')
-    }
-    replay.push({ turn: nodeTurn, startSeq: owner.startSeq, endSeq: owner.endSeq, shadowed: owned })
-  }
-
-  return { targetSeq, shadowed, turn, replay, baseTurn }
-}
-
-/**
- * Plan a SPLICE by the target the request addresses.
- * @param events - complete contiguous raw event log.
- * @param surfaceNodes - current surface seqs in model order.
- * @param request - `{ seq?, messageId?, turn? }`.
- * @returns `{ mode, targetSeq, startSeq, endSeq, shadowed, turn, replay,
- *   replayTurns, baseTurn, logFrom, logTo }`, where `replay` carries one entry
- *   per replayed turn (`{ turn, startSeq, endSeq, shadowed }`).
- * @throws {PlanError} with a stable code when the splice cannot be planned.
- */
-export function planSplice(events, surfaceNodes, request) {
-  const context = spliceContext(events, surfaceNodes)
-  const onSurface = new Set(surfaceNodes)
-  const targetSeq = resolveTargetSeq(events, surfaceNodes, request, 'splice')
-  if (targetSeq === undefined) throw new PlanError('not-deletable', 'target not found')
-  if (!onSurface.has(targetSeq)) throw new PlanError('already-deleted', 'target is not on the current surface')
-  const window = spliceWindow(context, targetSeq)
-  const { shadowed, replay } = window
-  return {
-    mode: 'splice',
-    ...window,
-    startSeq: shadowed[0],
-    endSeq: shadowed[shadowed.length - 1],
-    replayTurns: replay.map((entry) => entry.turn),
-    logFrom: replay.length > 0 ? replay[0].startSeq : shadowed[0],
-    // The walk runs to the END of the last replayed turn's bracket, not to its
-    // last surface node: step/end and turn/end follow the content, and a replay
-    // that stopped before them would leave the copied turn open - the log would
-    // then refuse the loop's next turn.
-    logTo: Math.max(replay.length > 0 ? Math.max(...replay.map((entry) => entry.endSeq)) : 0, ...shadowed),
-  }
-}
-
-/**
- * The live human-prompt seqs a splice would accept right now.
+ * The live human-prompt seqs a whole-turn delete would accept right now.
  *
  * This is the ADVERTISEMENT the state route publishes so a row only offers the
  * action the host will actually accept: every candidate seq is put through the
- * identical {@link spliceWindow} the route's plan uses, so this list cannot
- * drift from what a click does.
+ * identical {@link planRange} the route plans with, so this list cannot drift
+ * from what a click does.
  *
  * @param events - complete contiguous raw event log.
  * @param surfaceNodes - current surface seqs in model order.
- * @returns the spliceable prompt seqs, in surface order.
+ * @returns the deletable prompt seqs, in surface order.
  */
-export function spliceableSeqs(events, surfaceNodes) {
-  const context = spliceContext(events, surfaceNodes)
+export function turnableSeqs(events, surfaceNodes) {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
   const out = []
   for (const seq of surfaceNodes) {
-    const event = context.bySeq.get(seq)
+    const event = bySeq.get(seq)
     if (event === undefined || event.type !== 'user/message') continue
     if (!event.data || !event.data.source || event.data.source.kind !== 'user') continue
     try {
-      spliceWindow(context, seq)
+      planRange(events, surfaceNodes, { mode: 'turn', seq })
       out.push(seq)
     } catch {
-      // A prompt whose window cannot be reproduced offers no entry.
+      // A prompt whose turn cannot be removed offers no entry.
     }
   }
   return out
-}
-
-/**
- * Source marker shared by every event a splice appends.
- * Equivalent to dsh-rerun-turn's `replaySource`.
- * @param source - the original message source.
- * @param spliceId - operation identity.
- * @param originalSeq - the seq this copy was copied from.
- * @returns the marked source.
- */
-function spliceSource(source, spliceId, originalSeq) {
-  return {
-    ...(source && typeof source === 'object' ? source : {}),
-    spliceBy: PLUGIN_ID,
-    spliceId,
-    originalSeq,
-  }
-}
-
-/**
- * The call id one tool result resolves.
- * @param event - a tool/result event.
- * @returns the call id, or undefined for a result without one.
- */
-function resultCallId(event) {
-  const message = event.data && event.data.message
-  const source = message && message.source
-  if (source && typeof source.callId === 'string') return source.callId
-  if (message && typeof message.toolCallId === 'string') return message.toolCallId
-  return event.data && event.data.callId
-}
-
-/**
- * Build the replay writes of one splice.
- *
- * Equivalent to dsh-rerun-turn's `buildReplayWrites` (this repository is
- * standalone: the implementation is a copy, not a cross-package import), so the
- * copies are the platform's own ordinary events:
- *
- *   - fresh turn numbers, consecutive from `plan.baseTurn` (the format's
- *     `nextTurn` - an original number is refused by the real validator);
- *   - fresh message ids, `sourceEventSeqs` remapped onto the copies (assistant
- *     messages AND tool calls are both remappable here; a source that resolves
- *     to neither falls back to the copied assistant message);
- *   - `usage` and embedded `stream` dropped, so token statistics cannot double
- *     count and no half-streamed answer is replayed;
- *   - tool calls copied only as complete pairs, with the advertisement removed
- *     from the assistant content when its result never landed (the format
- *     refuses a step that closes with an unresolved call), while a
- *     `TOOL_NOT_STARTED` repair keeps its exact repair shape (no
- *     `sourceEventSeqs`, contract-shaped message id);
- *   - system messages and log-only records (attempts, retries, headers, splices,
- *     dispatches, workspace/todo bookkeeping) skipped: they describe the
- *     original run, not the conversation.
- *
- * One addition over the sibling's builder: a step whose content was entirely
- * retired is dropped and the surviving steps are renumbered from 1, because a
- * copied empty step would draw an empty process row. When nothing is dropped
- * the step numbering is the original one.
- *
- * @param events - complete contiguous raw event log.
- * @param plan - result of {@link planSplice}.
- * @param spliceId - operation identity stamped into every copy's source.
- * @param startSeq - the seq the first write lands at; writes are appended back
- *   to back, so each predicted seq is `startSeq` plus its offset.
- * @returns an ordered `{ type, data, surfaceOp?, sourceEventSeqs? }` write list.
- */
-export function buildSpliceReplayWrites(events, plan, spliceId, startSeq) {
-  const bySeq = new Map(events.map((event) => [event.seq, event]))
-  const shadowedSet = new Set(plan.shadowed)
-  const replayOfTurn = new Map(plan.replay.map((entry) => [entry.turn, entry]))
-  const turnOf = turnIndex(events)
-  const range = []
-  for (const event of events) {
-    if (event.seq < plan.logFrom || event.seq > plan.logTo) continue
-    if (isSurfaceEvent(event)) {
-      if (!shadowedSet.has(event.seq) || event.type === 'system/message') continue
-      if (!replayOfTurn.has(turnOfSeq(bySeq, turnOf, event.seq))) continue
-      range.push(event)
-      continue
-    }
-    if (
-      event.type === 'turn/start' ||
-      event.type === 'turn/end' ||
-      event.type === 'step/start' ||
-      event.type === 'step/end' ||
-      event.type === 'tool/call'
-    ) {
-      const turn = event.data && typeof event.data.turn === 'number' ? event.data.turn : undefined
-      const entry = turn === undefined ? undefined : replayOfTurn.get(turn)
-      if (entry === undefined || event.seq < entry.startSeq || event.seq > entry.endSeq) continue
-      range.push(event)
-    }
-  }
-
-  // Which steps survive: one that owns no copied message would draw an empty
-  // process row, so it leaves with its bracket and the rest are renumbered.
-  const stepMap = new Map()
-  for (const entry of plan.replay) {
-    const steps = []
-    for (const event of range) {
-      if (event.type === 'tool/call') continue
-      if (!event.data || event.data.turn !== entry.turn || typeof event.data.step !== 'number') continue
-      if (!steps.includes(event.data.step)) steps.push(event.data.step)
-    }
-    steps.sort((a, b) => a - b)
-    steps.forEach((step, index) => stepMap.set(entry.turn + ':' + String(step), index + 1))
-  }
-
-  // Tool pairing facts for the whole range, so the assistant content can be
-  // corrected before anything is written.
-  const calledIds = new Set()
-  const resultIds = new Set()
-  const repairIds = new Set()
-  for (const event of range) {
-    if (event.type === 'tool/call') {
-      calledIds.add(event.data.callId)
-      continue
-    }
-    if (event.type !== 'tool/result') continue
-    const callId = resultCallId(event)
-    resultIds.add(callId)
-    const error = event.data.error
-    if (error && error.name === 'ToolNotStartedError' && error.code === 'TOOL_NOT_STARTED' && event.sourceEventSeqs === undefined) {
-      repairIds.add(callId)
-    }
-  }
-  const pairedIds = new Set()
-  for (const id of calledIds) if (resultIds.has(id)) pairedIds.add(id)
-  for (const id of repairIds) if (!calledIds.has(id)) pairedIds.add(id)
-
-  const writes = []
-  let predicted = startSeq
-  let nextTurn = plan.baseTurn
-  const turnMap = new Map()
-  const copySeqByOriginal = new Map()
-  let lastAssistantSeq = null
-  const seqOf = () => {
-    const seq = predicted
-    predicted += 1
-    return seq
-  }
-  const stepOf = (turn, step) => {
-    const mapped = stepMap.get(String(turn) + ':' + String(step))
-    return mapped === undefined ? step : mapped
-  }
-  for (const event of range) {
-    const data = event.data || {}
-    if (event.type === 'turn/start') {
-      const entry = replayOfTurn.get(data.turn)
-      // A second bracket reusing this turn number is not the live one; the plan
-      // already proved every live node sits inside the bracket it chose.
-      if (entry === undefined || event.seq !== entry.startSeq) continue
-      turnMap.set(data.turn, nextTurn)
-      writes.push({ type: 'turn/start', data: { turn: nextTurn } })
-      seqOf()
-      continue
-    }
-    if (event.type === 'turn/end') {
-      const turn = turnMap.get(data.turn)
-      if (turn === undefined) continue
-      writes.push({ type: 'turn/end', data: { turn, reason: data.reason } })
-      seqOf()
-      nextTurn += 1
-      continue
-    }
-    if (event.type === 'step/start' || event.type === 'step/end') {
-      const turn = turnMap.get(data.turn)
-      if (turn === undefined || !stepMap.has(String(data.turn) + ':' + String(data.step))) continue
-      writes.push({ type: event.type, data: { turn, step: stepOf(data.turn, data.step) } })
-      seqOf()
-      continue
-    }
-    if (event.type === 'user/message') {
-      writes.push({
-        type: 'user/message',
-        surfaceOp: 'append',
-        data: {
-          id: randomUUID(),
-          role: 'user',
-          content: data.content,
-          source: spliceSource(data.source, spliceId, event.seq),
-        },
-      })
-      seqOf()
-      continue
-    }
-    if (event.type === 'assistant/message') {
-      const message = data.message || {}
-      const source = { ...(message.source || {}) }
-      // The provider's own replay state describes the original response; a copy
-      // that carried it would claim to be that very response.
-      delete source.replayState
-      const content = Array.isArray(message.content)
-        ? message.content.filter((block) => !(block && block.type === 'tool-call' && !pairedIds.has(block.id)))
-        : []
-      writes.push({
-        type: 'assistant/message',
-        surfaceOp: 'append',
-        data: {
-          turn: turnMap.get(data.turn),
-          step: stepOf(data.turn, data.step),
-          message: {
-            id: randomUUID(),
-            role: 'assistant',
-            content,
-            source: spliceSource(source, spliceId, event.seq),
-          },
-          stream: [],
-          ...(data.interrupted === true ? { interrupted: true } : {}),
-        },
-      })
-      copySeqByOriginal.set(event.seq, predicted)
-      lastAssistantSeq = predicted
-      seqOf()
-      continue
-    }
-    if (event.type === 'tool/call') {
-      if (!pairedIds.has(data.callId)) continue
-      writes.push({
-        type: 'tool/call',
-        data: {
-          turn: turnMap.get(data.turn),
-          step: stepOf(data.turn, data.step),
-          callId: data.callId,
-          name: data.name,
-          arguments: data.arguments,
-        },
-      })
-      copySeqByOriginal.set(event.seq, predicted)
-      seqOf()
-      continue
-    }
-    if (event.type === 'tool/result') {
-      const callId = resultCallId(event)
-      if (!pairedIds.has(callId)) continue
-      const message = data.message || {}
-      const rest = { ...message }
-      delete rest.id
-      delete rest.content
-      delete rest.source
-      // The repair carrier must keep its contract-shaped id
-      // (`interrupted-tool-result-<callId>-<n>`), so the suffix becomes the
-      // copy's own predicted seq and the identity stays self-describing.
-      const isRepair = repairIds.has(callId)
-      const messageId = isRepair ? 'interrupted-tool-result-' + String(callId) + '-' + String(predicted) : randomUUID()
-      let sourceEventSeqs
-      if (!isRepair) {
-        const remapped = Array.isArray(event.sourceEventSeqs)
-          ? event.sourceEventSeqs.map((seq) => copySeqByOriginal.get(seq)).filter((seq) => typeof seq === 'number')
-          : []
-        if (remapped.length > 0) sourceEventSeqs = remapped
-        else if (typeof lastAssistantSeq === 'number') sourceEventSeqs = [lastAssistantSeq]
-      }
-      writes.push({
-        type: 'tool/result',
-        surfaceOp: 'append',
-        ...(sourceEventSeqs === undefined ? {} : { sourceEventSeqs }),
-        data: {
-          turn: turnMap.get(data.turn),
-          step: stepOf(data.turn, data.step),
-          message: {
-            ...rest,
-            id: messageId,
-            content: message.content ?? [],
-            source: spliceSource(message.source, spliceId, event.seq),
-          },
-          ...(data.error === undefined ? {} : { error: data.error }),
-          ...(data.meta === undefined ? {} : { meta: data.meta }),
-        },
-      })
-      seqOf()
-      continue
-    }
-    // system/message and every log-only record are skipped on purpose.
-  }
-  return writes
 }

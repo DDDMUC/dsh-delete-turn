@@ -1,26 +1,27 @@
-// Verify a splice against a REAL session log and the REAL format validator.
+// Verify a whole-turn delete against a REAL session log and the REAL format
+// validator.
 //
 //   node tools/verify-real-session.mjs /tmp/session-xxxx.v4.jsonl.zstd [--turn 178]
 //
 // The tool never writes to the file it is given: it decodes the log, validates
 // it through the platform's own strict cold read, builds a real Session from the
 // decoded events, and then drives the plugin's actual HTTP route
-// (POST /dsh-delete-turn/delete { mode: 'splice' }) against that session. Every
+// (POST /dsh-delete-turn/delete { mode: 'turn' }) against that session. Every
 // appended event is recorded, the resulting log is put through the strict cold
 // read again, and the two folded surfaces - the node sequence the conversation
 // view draws - are printed side by side.
 //
-// Exit code 0 means every assertion held: the deleted turn and the originals of
-// the replayed turns left the surface, the replayed copies are the only
-// remaining copy of that content, and the log plus one more loop-opened turn
-// still passes the format validator.
+// Exit code 0 means every assertion held: the deleted turn's nodes left the
+// surface, every later turn is still there under its own number, exactly one
+// event landed, and the log plus one more loop-opened turn still passes the
+// format validator.
 import { readFileSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { randomUUID } from 'node:crypto'
 import { loadDshModule } from './dsh-modules.mjs'
 import { decodeZstdFrames } from './decode-session-log.mjs'
 import { apply } from '../src/index.js'
-import { foldSurface, isOwnPlaceholder, isSilentPluginCarrier, planSplice } from '../src/logic.js'
+import { foldSurface, isOwnPlaceholder, isSilentPluginCarrier, planRange } from '../src/logic.js'
 
 const args = process.argv.slice(2)
 const logPath = args[0]
@@ -96,7 +97,7 @@ function surfaceLines(nodes, bySeq, turnOf) {
 
 // --- decode + validate the original -----------------------------------------
 const decoded = decodeLog(logPath)
-console.log('dsh-delete-turn splice verification on a real session log')
+console.log('dsh-delete-turn whole-turn delete verification on a real session log')
 console.log('  log      ' + logPath)
 console.log('  session  ' + decoded.header.id + '  (' + decoded.rows.length + ' rows decoded from the file)')
 let originalArtifact
@@ -129,9 +130,10 @@ const humanPromptTurn = (turn) =>
     const event = beforeBySeq.get(seq)
     return nodeTurn(seq) === turn && event.type === 'user/message' && event.data.source && event.data.source.kind === 'user'
   })
-const candidates = turns.filter((turn) => humanPromptTurn(turn) && turns.some((later) => later > turn && before.some((seq) => nodeTurn(seq) === later)))
-const targetTurn = requestedTurn === undefined ? candidates[candidates.length - 3] : requestedTurn
-if (targetTurn === undefined) { console.log('no turn with a human prompt and later turns'); process.exit(1) }
+// The first turn holds the system prompt head and must not be chosen by default.
+const candidates = turns.filter((turn) => turn !== turns[0] && humanPromptTurn(turn))
+const targetTurn = requestedTurn === undefined ? candidates[candidates.length - 1] : requestedTurn
+if (targetTurn === undefined) { console.log('no removable turn with a human prompt'); process.exit(1) }
 
 console.log('')
 console.log('surface BEFORE: ' + before.length + ' nodes (platform fold == this plugin fold: ' + (JSON.stringify(foldSurface(events).nodes) === JSON.stringify(before)) + ')')
@@ -139,6 +141,8 @@ console.log('tail of the folded surface - every row the conversation view can dr
 console.log(surfaceLines(before.filter((seq) => nodeTurn(seq) === undefined || nodeTurn(seq) >= targetTurn - 1), beforeBySeq, beforeTurnOf).join('\n'))
 
 // --- drive the plugin's real route -------------------------------------------
+// No `sessionController` is provided on purpose: a whole-turn delete must not
+// need the agent handle (the removed splice needed it to re-point the loop).
 const record = []
 const append = session.append.bind(session)
 session.append = (type, data, ...opts) => {
@@ -147,8 +151,6 @@ session.append = (type, data, ...opts) => {
   return landed
 }
 const routes = new Map()
-const lastTurn = Math.max(...turns)
-const agent = { session, phase: { kind: 'idle', lastTurn } }
 const ctx = {
   effect: (fn) => fn(),
   inject: () => {},
@@ -156,7 +158,6 @@ const ctx = {
     if (name === 'webServer') return { register: (spec) => { routes.set(spec.path, spec); return () => {} } }
     if (name === 'sessions') return { get: () => session, flush: async () => true }
     if (name === 'sessionQuery') return { readSession: async () => ({ events: session.snapshotEvents() }) }
-    if (name === 'sessionController') return { resolveAgent: async () => ({ agent }) }
     return undefined
   },
 }
@@ -165,14 +166,14 @@ const route = routes.get('/dsh-delete-turn/delete')
 if (route === undefined) { console.log('the delete route did not register'); process.exit(1) }
 
 async function get(url) {
-  const route = routes.get('/dsh-delete-turn/state')
+  const stateRoute = routes.get('/dsh-delete-turn/state')
   const req = new EventEmitter()
   req.method = 'GET'
   req.url = url
   req.socket = { remoteAddress: '127.0.0.1' }
   req.headers = { host: '127.0.0.1:3080', accept: 'application/json' }
   const res = { statusCode: 0, body: '', writeHead(code) { this.statusCode = code }, end(payload) { this.body = payload } }
-  await route.handler(req, res)
+  await stateRoute.handler(req, res)
   return { status: res.statusCode, payload: JSON.parse(res.body) }
 }
 
@@ -190,19 +191,19 @@ function call(body) {
 // The advertisement the state route publishes: every row it lists must be
 // accepted by the planner, or a click would be a false button.
 const advertised = await get('/dsh-delete-turn/state?sessionId=' + encodeURIComponent(decoded.header.id))
-const advertisedSeqs = Array.isArray(advertised.payload.spliceSeqs) ? advertised.payload.spliceSeqs : []
+const advertisedSeqs = Array.isArray(advertised.payload.turnSeqs) ? advertised.payload.turnSeqs : []
 let unplannable = 0
 for (const seq of advertisedSeqs) {
-  try { planSplice(session.snapshotEvents(), [...session.surface.nodes], { mode: 'splice', seq }) } catch { unplannable += 1 }
+  try { planRange(session.snapshotEvents(), [...session.surface.nodes], { mode: 'turn', seq }) } catch { unplannable += 1 }
 }
 check('every advertised row is plannable', advertised.status === 200 && unplannable === 0, advertisedSeqs.length + ' rows advertised, ' + unplannable + ' unplannable')
 
-const request = { sessionId: decoded.header.id, mode: 'splice', turn: targetTurn }
+const request = { sessionId: decoded.header.id, mode: 'turn', turn: targetTurn }
 const response = await call(request)
 console.log('')
 console.log('POST /dsh-delete-turn/delete ' + JSON.stringify(request))
 console.log('  -> HTTP ' + response.status + ' ' + JSON.stringify(response.payload))
-if (response.status !== 200) { console.log('the splice was refused; nothing else to verify'); process.exit(1) }
+if (response.status !== 200) { console.log('the turn delete was refused; nothing else to verify'); process.exit(1) }
 const result = response.payload
 
 console.log('')
@@ -217,7 +218,7 @@ record.forEach((entry, index) => {
   console.log('  ' + String(index + 1).padStart(4) + '  seq ' + String(entry.seq).padStart(6) + '  ' + entry.type.padEnd(17) + ' turn=' + turn.padEnd(10) + ' surfaceOp=' + op.padEnd(46) + ' sourceEventSeqs=' + sources)
 })
 
-// --- the folded surface after the splice --------------------------------------
+// --- the folded surface after the delete -------------------------------------
 const landed = session.snapshotEvents()
 const after = [...session.surface.nodes]
 const afterBySeq = new Map(landed.map((event) => [event.seq, event]))
@@ -233,21 +234,15 @@ const retired = result.hidden.map((item) => item.seq)
 const stillThere = retired.filter((seq) => after.includes(seq))
 check('every node the carrier shadowed left the surface', stillThere.length === 0, retired.length + ' nodes retired' + (stillThere.length > 0 ? ', still present: ' + stillThere.join(',') : ''))
 
-const sourceOf = (event) => {
-  const data = event.data || {}
-  return event.type === 'user/message' ? data.source : data.message && data.message.source
-}
-const copies = landed.filter((event) => after.includes(event.seq) && sourceOf(event) && sourceOf(event).spliceId === result.spliceId)
-check('the replay copies carry the operation identity', copies.length > 0, copies.length + ' events with spliceId ' + result.spliceId)
-const copyTurns = [...new Set(copies.filter((event) => event.type === 'assistant/message').map((event) => event.data.turn))].sort((a, b) => a - b)
-const expectedTurns = result.replayTurns.map((_, index) => result.baseTurn + index)
-check('copies carry fresh consecutive turn numbers', JSON.stringify(copyTurns) === JSON.stringify(expectedTurns), 'baseTurn ' + result.baseTurn + ' -> ' + JSON.stringify(copyTurns) + ' (originals were ' + JSON.stringify(result.replayTurns) + ')')
+// One append, no turn border: the delete never replays or renumbers anything.
+check('exactly one event landed', record.length === 1, record.length + ' writes')
+check('the delete opened no turn', landed.filter((event) => event.type === 'turn/start').length === turns.length, turns.length + ' turns before and after')
+const laterNodes = before.filter((seq) => typeof nodeTurn(seq) === 'number' && nodeTurn(seq) > targetTurn)
+const laterLost = laterNodes.filter((seq) => !after.includes(seq))
+check('every later turn is still on the surface under its own number', laterLost.length === 0, laterNodes.length + ' later nodes kept' + (laterLost.length > 0 ? ', lost: ' + laterLost.join(',') : ''))
 
 // The conversation view's acceptance: the multiset of visible conversation
-// rows must lose EXACTLY the deleted turn's rows. A replayed turn leaves and
-// returns as a copy, so its counts do not move - which means a copy of a node
-// the carrier failed to shadow shows up here as an extra count (the negative
-// control), and a missing copy shows up as a missing one.
+// rows must lose EXACTLY the deleted turn's rows, and nothing else.
 const visibleText = (event) => {
   const data = event.data || {}
   const message = event.type === 'user/message' ? data : data.message
@@ -272,7 +267,7 @@ const conversationCounts = (nodes, bySeq) => {
 }
 const beforeCounts = conversationCounts(before, beforeBySeq)
 const deletedCounts = conversationCounts(
-  retired.filter((seq) => nodeTurn(seq) === result.deletedTurn),
+  retired.filter((seq) => nodeTurn(seq) === targetTurn),
   beforeBySeq,
 )
 const expectedCounts = new Map(beforeCounts)
@@ -289,8 +284,8 @@ check(
   mismatches.length === 0,
   mismatches.length === 0 ? beforeCounts.size + ' distinct rows checked' : JSON.stringify(mismatches),
 )
-const deletedRows = retired.filter((seq) => nodeTurn(seq) === result.deletedTurn).length
-check('turn ' + result.deletedTurn + ' itself has no surface node left', deletedRows > 0, deletedRows + ' rows were shadowed')
+const deletedRows = retired.filter((seq) => nodeTurn(seq) === targetTurn).length
+check('turn ' + targetTurn + ' itself has no surface node left', deletedRows > 0, deletedRows + ' rows were shadowed')
 
 // The carrier stands where the deleted window was: turn-less, and carrying no
 // readable text (an empty content list, or a single zero-width space when the
@@ -306,22 +301,20 @@ check('the carrier row is hidden by the ledger', result.hidden.every((item) => i
 
 let afterRead = null
 try { afterRead = coldReadOf(decoded.header, landed) } catch (error) { afterRead = String(error.message) }
-check('the post-splice log passes the strict cold read', typeof afterRead === 'object' && afterRead !== null, typeof afterRead === 'string' ? afterRead : afterRead.events.length + ' events')
+check('the post-delete log passes the strict cold read', typeof afterRead === 'object' && afterRead !== null, typeof afterRead === 'string' ? afterRead : afterRead.events.length + ' events')
 
-// The loop opens its next turn from its (synced) counter: with the counter left
-// at the pre-splice maximum this append would collide and the log would stop
-// being readable, which is exactly what syncLoopTurn prevents.
-const loopTurn = agent.phase.lastTurn + 1
+// The numbering was never touched, so the loop's next turn follows the closed
+// count and the strict validator accepts it with no counter sync.
+const loopTurn = landed.filter((event) => event.type === 'turn/end').length + 1
 session.append('turn/start', { turn: loopTurn })
 session.append('step/start', { turn: loopTurn, step: 1 })
-session.append('user/message', { id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'after the splice' }], source: { kind: 'user', rpcId: randomUUID() } }, { surfaceOp: 'append' })
+session.append('user/message', { id: randomUUID(), role: 'user', content: [{ type: 'text', text: 'after the delete' }], source: { kind: 'user', rpcId: randomUUID() } }, { surfaceOp: 'append' })
 session.append('assistant/message', { turn: loopTurn, step: 1, message: { id: randomUUID(), role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'p', model: 'm' } }, stream: [] }, { surfaceOp: 'append' })
 session.append('step/end', { turn: loopTurn, step: 1 })
 session.append('turn/end', { turn: loopTurn, reason: { kind: 'completed' } })
 let finalRead = null
 try { finalRead = coldReadOf(decoded.header, session.snapshotEvents()) } catch (error) { finalRead = String(error.message) }
-check('a loop-opened turn ' + loopTurn + ' after the replay keeps the log readable', typeof finalRead === 'object' && finalRead !== null, typeof finalRead === 'string' ? finalRead : finalRead.events.length + ' events')
-check('the loop counter was synced to the replay maximum', agent.phase.lastTurn === Math.max(...copyTurns), 'phase.lastTurn ' + lastTurn + ' -> ' + agent.phase.lastTurn)
+check('a loop-opened turn ' + loopTurn + ' after the delete keeps the log readable', typeof finalRead === 'object' && finalRead !== null, typeof finalRead === 'string' ? finalRead : finalRead.events.length + ' events')
 
 console.log('')
 console.log(failures === 0 ? 'ALL CHECKS PASSED' : failures + ' CHECK(S) FAILED')

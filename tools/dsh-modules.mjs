@@ -3,7 +3,7 @@
 //
 // The plugin itself has zero runtime dependencies and never imports these: they
 // are only used by the contract test and tools/verify-real-session.mjs to prove
-// that every write a splice lands is accepted by the platform's own validator -
+// that every write a delete lands is accepted by the platform's own validator -
 // the append-time surface manager and the strict cold read
 // (sessionFormatCatalog.createRestore), not a re-implementation of either.
 //

@@ -5,9 +5,10 @@
 // `Session` class, drives the plugin's actual HTTP route against them, and then
 // puts the resulting log through the strict cold read the persistence reader
 // uses (`sessionFormatCatalog.createRestore` - the v4 vocabulary, relationship
-// and lifecycle validators). Two negative controls are asserted too: a window
-// that shadows only the deleted turn duplicates the tail, and a replay that
-// reuses the original turn numbers is refused by that same validator.
+// and lifecycle validators). The whole-turn delete is one ordinary range replace,
+// so the contract under test is a single append that leaves the turn numbering
+// untouched; the negative control still asks the platform validator to refuse a
+// turn number that does not follow the log.
 //
 // The DSH packages are resolved from the installed platform (see
 // tools/dsh-modules.mjs); the plugin itself never imports them.
@@ -17,7 +18,6 @@ import { randomUUID } from 'node:crypto'
 import test from 'node:test'
 import { loadDshModule } from '../tools/dsh-modules.mjs'
 import { apply } from '../src/index.js'
-import { buildSpliceReplayWrites, planSplice } from '../src/logic.js'
 
 const { Session, SessionId, SESSION_FORMAT_VERSION } = await loadDshModule('@deepseek-ai/dsh-session')
 const { sessionFormatCatalog } = await loadDshModule('@deepseek-ai/dsh-session-format-catalog')
@@ -154,12 +154,15 @@ function visibleShape(session, hide = new Set()) {
   return rows
 }
 
-const SPLICE_SHAPE = ['user:A', 'assistant:A1', 'user:C', 'assistant:C1 working', 'tool:C result', 'assistant:C1 final', 'user:D', 'assistant:D1']
+// What the conversation view draws after turn B (its prompt, injected context
+// and reply) is removed; C and D keep their own rows and their own numbers.
+const TURN_SHAPE = ['user:A', 'assistant:A1', 'user:C', 'assistant:C1 working', 'tool:C result', 'assistant:C1 final', 'user:D', 'assistant:D1']
 
-// Drive the plugin's real route against a real Session.
+// Drive the plugin's real route against a real Session. No `sessionController`
+// is provided on purpose: a whole-turn delete must not need the agent handle
+// (the removed splice needed it only to re-point the loop's turn counter).
 function routeHarness(session) {
   const routes = new Map()
-  const agent = { session, phase: { kind: 'idle', lastTurn: 0 } }
   const ctx = {
     effect: (fn) => fn(),
     inject: () => {},
@@ -167,7 +170,6 @@ function routeHarness(session) {
       if (name === 'webServer') return { register: (spec) => { routes.set(spec.path, spec); return () => {} } }
       if (name === 'sessions') return { get: () => session, flush: async () => true }
       if (name === 'sessionQuery') return { readSession: async () => ({ events: session.snapshotEvents() }) }
-      if (name === 'sessionController') return { resolveAgent: async () => ({ agent }) }
       return undefined
     },
   }
@@ -183,115 +185,67 @@ function routeHarness(session) {
     process.nextTick(() => { req.emit('data', Buffer.from(JSON.stringify(body))); req.emit('end') })
     const res = { statusCode: 0, body: '', writeHead(code) { this.statusCode = code }, end(payload) { this.body = payload } }
     await route.handler(req, res)
-    return { status: res.statusCode, payload: JSON.parse(res.body), agent }
+    return { status: res.statusCode, payload: JSON.parse(res.body) }
   }
 }
 
-function replayInto(session, plan, spliceId, transform) {
-  session.append(
-    'user/message',
-    { id: randomUUID(), role: 'user', content: [], source: { kind: 'plugin:dsh-delete-turn', spliceId } },
-    { surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq }, sourceEventSeqs: plan.shadowed },
-  )
-  const writes = buildSpliceReplayWrites(session.snapshotEvents(), plan, spliceId, session.seq)
-  for (const write of transform === undefined ? writes : transform(writes)) {
-    const opts = write.surfaceOp === undefined ? [] : [{ surfaceOp: write.surfaceOp, ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }) }]
-    session.append(write.type, write.data, ...opts)
-  }
-}
-
-test('a splice passes the real validator and leaves A, C-prime and D-prime', async () => {
+test('a whole-turn delete is one range replace and passes the real validator', async () => {
   const { session, header } = conversation()
   const before = [...session.surface.nodes]
+  const seqBefore = session.seq
   const call = routeHarness(session)
-  const response = await call({ sessionId: header.id, mode: 'splice', turn: 2 })
+  const response = await call({ sessionId: header.id, mode: 'turn', turn: 2 })
   assert.equal(response.status, 200, JSON.stringify(response.payload))
-  assert.equal(response.payload.deletedTurn, 2)
-  assert.deepEqual(response.payload.replayTurns, [3, 4])
-  assert.equal(response.payload.baseTurn, 5)
-  assert.equal(response.payload.sync, 'synced', 'the loop counter was re-pointed at the replay maximum')
 
-  const after = [...session.surface.nodes]
-  for (const item of response.payload.hidden) assert.equal(after.includes(item.seq), false, 'seq ' + item.seq + ' left the surface')
-  // The folded node sequence: A, the carrier standing where the retired window
-  // was, then the copies. The carrier is the one node the fold adds; its own row
-  // is the one the transcript hides, so the conversation draws A, C-prime and D-prime.
-  assert.deepEqual(after.slice(0, 3), [before[0], before[1], response.payload.replacementSeq])
-  assert.deepEqual(visibleShape(session, new Set([response.payload.replacementSeq])), SPLICE_SHAPE, 'the conversation view is A, C-prime and D-prime')
-  assert.equal(visibleShape(session).length, SPLICE_SHAPE.length + 1, 'the only extra derived row is the carrier itself')
-  const carrier = session.snapshotEvents()[response.payload.replacementSeq]
+  // Turn B's three live nodes - prompt, injected context, reply - in one window.
+  assert.equal(response.payload.hidden.length, 3)
+  assert.deepEqual(response.payload.hidden.map((item) => item.mode), ['turn', 'turn', 'turn'])
+  const shadowed = response.payload.hidden.map((item) => item.seq)
+  assert.deepEqual(shadowed, before.slice(2, 5), "the window is exactly turn B's surface nodes")
+
+  // Exactly one event lands: no turn border, no copy of C or D.
+  const events = session.snapshotEvents()
+  assert.equal(events.length, seqBefore + 1, 'one append and nothing else')
+  assert.equal(events.filter((event) => event.type === 'turn/start').length, 4, 'no replayed turn is opened')
+  const carrier = events[response.payload.replacementSeq]
+  assert.equal(carrier.type, 'user/message')
   assert.equal(carrier.data.turn, undefined, 'the carrier is turn-less')
   assert.equal(
     carrier.data.content.length === 0 || (carrier.data.content.length === 1 && carrier.data.content[0].text === '\u200b'),
     true,
     'the carrier carries no readable text',
   )
-  assert.ok(after.length < before.length, 'the deleted turn and its context row are gone')
+  assert.equal(carrier.surfaceOp.op, 'replace')
+  const after = [...session.surface.nodes]
+  for (const seq of shadowed) assert.equal(after.includes(seq), false, 'seq ' + seq + ' left the surface')
+  assert.deepEqual(
+    after,
+    [before[0], before[1], response.payload.replacementSeq, ...before.slice(5)],
+    'the carrier stands where turn B stood; C and D are untouched',
+  )
 
-  const events = session.snapshotEvents()
-  const copies = events.filter((event) => {
-    const source = event.type === 'user/message' ? event.data.source : event.data.message && event.data.message.source
-    return source && source.spliceId === response.payload.spliceId
-  })
-  const copyTurns = [...new Set(copies.filter((event) => event.type === 'assistant/message').map((event) => event.data.turn))].sort((a, b) => a - b)
-  assert.deepEqual(copyTurns, [5, 6], 'the copies carry the fresh numbers the format requires')
-  assert.deepEqual(copies.filter((event) => event.type === 'tool/result').map((event) => event.sourceEventSeqs.length), [1], 'a copied result cites the copied call')
-  assert.equal(events.some((event) => event.type === 'assistant/message' && event.data.usage !== undefined && event.data.turn >= 5), false, 'usage is not replayed')
+  // The transcript shows A, C and D; the only extra derived row is the carrier.
+  assert.deepEqual(visibleShape(session, new Set([response.payload.replacementSeq])), TURN_SHAPE)
+  assert.equal(visibleShape(session).length, TURN_SHAPE.length + 1, 'the only extra derived row is the carrier itself')
 
-  // The real validator accepts the whole log, and still does after the loop
-  // opens its next turn from the counter the host just synced.
+  // The real validator accepts the whole log and the round trip preserves the fold.
   const artifact = coldRead(header, events)
   assert.equal(artifact.events.length, events.length)
   const reloaded = Session.create(header.id, artifact.events, header)
-  assert.deepEqual(visibleShape(reloaded, new Set([response.payload.replacementSeq])), SPLICE_SHAPE, 'the round trip preserves the fold')
-  assert.ok(response.agent.phase.lastTurn > 0, 'the loop counter was synced before the next turn')
-  plainTurn(reloaded, response.agent.phase.lastTurn + 1, 'E', 'E1')
+  assert.deepEqual(visibleShape(reloaded, new Set([response.payload.replacementSeq])), TURN_SHAPE, 'the round trip preserves the fold')
+  // The numbering was never touched, so the loop's next real turn follows the
+  // closed count and the strict validator accepts it with no counter sync.
+  const closed = events.filter((event) => event.type === 'turn/end').length
+  plainTurn(reloaded, closed + 1, 'E', 'E1')
   coldRead(header, reloaded.snapshotEvents())
 })
 
-test('the negative control: a window over the deleted turn alone duplicates the tail', () => {
+test('the negative control: the platform refuses a turn number that does not follow the log', () => {
   const { session, header } = conversation()
-  const events = session.snapshotEvents()
-  const plan = planSplice(events, [...session.surface.nodes], { mode: 'splice', turn: 2 })
-  const turnOf = new Map()
-  let current
-  for (const event of events) {
-    if (event.type === 'turn/start') current = event.data.turn
-    if (event.type === 'turn/end') current = undefined
-    turnOf.set(event.seq, event.data && typeof event.data.turn === 'number' ? event.data.turn : current)
-  }
-  // Exactly the mutation this design must never ship: shadow the deleted turn
-  // only, then append the replayed copies.
-  const ownTurn = plan.shadowed.filter((seq) => turnOf.get(seq) === plan.turn)
-  const narrow = { ...plan, startSeq: ownTurn[0], endSeq: ownTurn[ownTurn.length - 1], shadowed: ownTurn }
-  const spliceId = randomUUID()
-  session.append(
-    'user/message',
-    { id: randomUUID(), role: 'user', content: [], source: { kind: 'plugin:dsh-delete-turn', spliceId } },
-    { surfaceOp: { op: 'replace', startSeq: narrow.startSeq, endSeq: narrow.endSeq }, sourceEventSeqs: narrow.shadowed },
-  )
-  const writes = buildSpliceReplayWrites(events, plan, spliceId, session.seq)
-  for (const write of writes) {
-    const opts = write.surfaceOp === undefined ? [] : [{ surfaceOp: write.surfaceOp, ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }) }]
-    session.append(write.type, write.data, ...opts)
-  }
-  const shape = visibleShape(session)
-  assert.deepEqual(shape, [...SPLICE_SHAPE.slice(0, 2), ...SPLICE_SHAPE.slice(2), ...SPLICE_SHAPE.slice(2)], 'the old C and D are still on the surface, so the copies duplicate them')
-  assert.notDeepEqual(shape, SPLICE_SHAPE, 'the acceptance assertion is what catches it - the validator cannot see duplicates')
-  // The duplicated log still passes the cold read.
-  coldRead(header, session.snapshotEvents())
-})
-
-test('the negative control: reusing the original turn numbers is refused', () => {
-  const { session, header } = conversation()
-  const events = session.snapshotEvents()
-  const plan = planSplice(events, [...session.surface.nodes], { mode: 'splice', turn: 2 })
-  const numbers = new Map(plan.replayTurns.map((turn, index) => [plan.baseTurn + index, turn]))
-  replayInto(session, plan, randomUUID(), (writes) =>
-    writes.map((write) => (write.data && numbers.has(write.data.turn) ? { ...write, data: { ...write.data, turn: numbers.get(write.data.turn) } } : write)),
-  )
+  // A delete appends no turn; nothing may reuse a closed number either.
+  session.append('turn/start', { turn: 2 })
   assert.throws(
     () => coldRead(header, session.snapshotEvents()),
-    (error) => /turn\/start does not open the expected turn/.test(String(error.message)),
+    (error) => /expected turn/.test(String(error.message)),
   )
 })

@@ -23,13 +23,13 @@ DSH 的会话日志是 append-only 的：说错话、发错提示词、模型答
 - 用户消息 → 删这一条；
 - 思考卡 / 工具调用卡 → 删这一步（该步的 `assistant/message` 与它请求的 `tool/result` 一起走，工具配对永不悬空）；
 - 助手回复（官方操作条）→ 删这条回复连同它的思考、工具调用与注入上下文（你的提问保留）；
-- 用户消息行 → 还有第二个入口：**删掉这一整轮（含提问）并把后面的轮次接上**（见下）；
+- 用户消息行 → 还有第二个入口：**删掉这一整轮（含提问、注入上下文与全部回复）**；
 - 注入上下文行、失败回合行 → 同样有删除入口。
 
 ### 特性
 
 - **模型上下文级删除** —— 追加一条官方 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件，被遮蔽的内容不再进入 `deriveMessages()`；与宿主 `/compact` 同一套官方契约
-- **整轮删除并接上后面（新）** —— 删掉一轮（**含你的提问**），随后把它之后的每一轮**以新的连续轮号逐事件重放**回来：对话视图里这一轮消失、后面的内容直接接上，模型上下文读到的也是接上后的历史
+- **整轮删除（新）** —— 删掉一轮（**含你的提问**、注入上下文、全部回复与工具结果）：一次普通的范围替换落地，后面的轮次原地保留、连编号都不变——不重放、不重编号、日志只多一条事件
 - **转录级隐藏** —— 客户端按 `data-chat-flow-*` 锚点与官方 `useChat` 快照定位行，删除后折叠退场；刷新、重启 DSH、换标签页后依旧隐藏
 - **日志即台账** —— 隐藏依据直接从日志里的替换事件重建（替换事件的消息 source 标记为本插件），不依赖 localStorage、不需要预检，也不会和其它插件（如压缩）的替换混淆
 - **原生视觉** —— 复用官方 primitives 的 Modal / Button 与主题 token，明暗主题自动适配；图标与全部文案为原创
@@ -67,7 +67,7 @@ dsh --profile web --dump-config   # 应出现 "# == dsh-delete-turn" 段落
 ### 使用
 
 1. 悬停任意消息行，点击行尾的垃圾桶按钮；助手回复的按钮在官方操作条（复制 / 分叉旁边）。
-2. 确认弹窗会说明这次删除的影响范围，点「删除」。用户消息行上还有一个「删除这一轮并接上后面」入口：它删的是**整轮**（含你的提问），并把它之后的每一轮重放回来接上。
+2. 确认弹窗会说明这次删除的影响范围，点「删除」。用户消息行上还有一个「删除这一轮」入口：它删的是**整轮**（含你的提问、注入上下文与全部回复），后面的轮次原地保留、直接接上。
 3. 目标行折叠退场；模型上下文在**下一轮请求**重建时不再包含它。
 
 ### 工作原理
@@ -90,13 +90,11 @@ UI（官方槽按钮 / DOM 增强按钮）
   useChat 快照把 data-chat-flow-key 映射到节点，按 hidden 集合折叠行
   GET /dsh-delete-turn/state 在每次打开会话时重建 hidden 集合
 
-整轮删除并接上后面（mode: 'splice'）：
-  一次 surface-replace：窗口 =「这一轮的第一个节点 → 当前面最后一个节点」
-  （被删的轮与它之后的每一轮的节点全部遮蔽，所以旧副本不会留在面上）
-  随后逐事件重放它之后的每一轮：新轮号（从日志的 nextTurn 起，见下）、新消息 id、
-  sourceEventSeqs 重映射到副本、丢弃 usage 与内嵌 stream、工具调用只成对复制、
-  TOOL_NOT_STARTED 修复保持精确形状、系统消息与纯记账事件不复制
-  重放写完的同一 tick 里，把代理循环的空闲轮号计数器同步到日志的真实最大轮号
+整轮删除（mode: 'turn'）：
+  一次普通的 surface-replace：窗口 = 这一轮的全部表面节点
+  （提问 + 注入上下文 + 每个 step 的 assistant/message 与 tool/result）
+  落一条 turn-less 载体，后面的轮次原地保留、编号不变
+  —— 不重放、不重编号、不碰代理循环，日志只多一条事件
 ```
 
 设计要点：
@@ -104,9 +102,8 @@ UI（官方槽按钮 / DOM 增强按钮）
 - **为什么载体是 turn-less 的零宽空格 user 消息（绝不能开合成回合）**：删除的替换载体只能是**不带回合的 `user/message`**。开一个「合成 turn+step」来安放对模型隐身的空 `system/message` 会**损坏日志**：agent loop 只从它自己开的回合推进回合号，外部开掉的回合号会被它的下一个真实回合复用（冷读报 `turn/start does not open the expected turn`），而任何按回合号做隐藏的客户端都会把被复用的那个真实回合整轮吞掉——此故障已在真实会话里复现（消息「被吞掉」）。因此载体退回 turn-less 形状，内容用**单个零宽空格**（空内容数组会被网关 400 `user message must have content`，可读标记会被模型复述；零宽空格对校验器非空、对模型无字面文本）。代价：模型可能把这条载体读成一条空白 user 消息。历史日志里已经写入的簿记回合（旧版本产生）由客户端按 `/state` 的 `markerTurns` 隐藏。
 - **为什么不读 React fiber / CSS 哈希类名**：行定位只用官方 `data-chat-flow-*` 锚点与官方 `useChat` 标准 hook，宿主 UI 重构不会静默失效。
 - **为什么刷新后仍然隐藏**：隐藏台账不是浏览器本地状态，而是日志里替换事件的可重放推导；宿主 `/state` 路由在每次打开会话时重建它。
-- **整轮删除的轮号只能往上走**：会话格式（`dsh-session-format-v3-to-v4`）要求 `turn/start` 的 `data.turn` 必须等于日志的 `nextTurn`（每个 `turn/end` 加一），所以重放出来的轮次**不可能**沿用原号，只能拿日志里的下一个号。对话视图不画编号，A/B/C/D 删 B 之后看起来就是 A、C、D 三条；编号在日志里仍然单调递增（轨迹视图按日志轮号画，见「已知限制」）。
-- **为什么复刻 dsh-rerun-turn 的重放做法**：中缀重跑插件已经把「遮蔽 + 逐事件重放」在真机上跑通（新轮号 / 新 id / `sourceEventSeqs` 重映射 / `TOOL_NOT_STARTED` 保真 / 丢弃 usage 与 stream）。两个仓库相互独立，这里不是跨包 import，而是**按它的实现写了一份等价代码**（`buildSpliceReplayWrites` 等价于 `buildReplayWrites`），源码注释里写明了对应关系；唯一新增：只装系统消息的空步骤会被丢掉、保留的步骤重新从 1 连续编号（否则屏幕上会多出一条空过程行）。
-- **广告即承诺**：`/state` 报出 `spliceSeqs`（现在哪些行可以整轮删除），它由**路由规划用的同一份**窗口检查算出（`spliceableSeqs` 与 `planSplice` 共用 `spliceWindow`），所以界面上的入口不会变成一次注定被拒的点击。
+- **整轮删除不重放、不重编号**：只遮蔽这一轮自己的表面节点，后面的轮次一条不动——日志的轮号、后续轮的内容、它们对其他事件的引用都不受影响，也不需要任何跨轮操作。
+- **广告即承诺**：`/state` 报出 `turnSeqs`（现在哪些行可以整轮删除），它由**路由规划用的同一个函数**算出（`turnableSeqs` 对每个候选调用 `planRange`），所以界面上的入口不会变成一次注定被拒的点击。
 
 ### 已知限制
 
@@ -116,13 +113,19 @@ UI（官方槽按钮 / DOM 增强按钮）
 - 助手操作条的删除范围是**整条回复**；要只删某一步，请用思考卡 / 工具卡上的按钮。
 - 过程行（「已思考」「用时 N 秒」）不单独提供删除入口：它的范围同样是整条回复，与操作条重复，因此只保留操作条那一个。
 - 已经被官方压缩（`/compact`）移出模型上下文的内容不再显示删除入口：它已经不在上下文里，转录用意保留；入口只在内容仍可删时才出现。
-- **整轮删除不会让日志里的轮号变小（轨迹视图会看出来）**：重放出来的轮次拿到的是日志里的**下一个号**（A/B/C/D 删 B → 重放的 C、D 是 5、6），因为格式要求 `turn/start` 必须是 `nextTurn`。对话视图画的是折叠后的消息、不画编号，所以它是 A、C、D 三条；**轨迹视图按日志轮号画**，那里会看到编号 1、2、3、4、5、6（被遮蔽的那一轮在轨迹里显示成什么，取决于轨迹是按账本还是按折叠渲染 —— 这一点本次**没有实测**，不要据此推断）。
 - **整轮删除也删掉你的提问**：它删的是整轮（提示词 + 注入上下文 + 全部回复步骤）；只删回复请用助手操作条，只删提示词请用用户行上的垃圾桶。
-- 重放的副本是**有损拷贝**：`usage` 与内嵌 stream 被丢弃（防统计翻倍）、系统消息不复制（系统提示词由循环自己调和）、纯记账事件（attempt / retry / inbox splice / dispatch / 工作区与待办记录）不复制；被重放轮次里的**工具不会重新执行**（结果照抄）。
-- 尾部里如果夹着**别的插件留下的非载体 turn-less 节点**（例如某个注入上下文行），整轮删除会直接拒绝（`range-not-clean`），不会静默地把它一起删掉；含系统提示词头的第一轮不能整轮删除。
+- 这一轮的窗口里如果夹着**别的插件留下的、既不是本插件占位符也不是静默载体的节点**（例如某个可读的注入内容），整轮删除会直接拒绝（`range-not-clean`），不会静默地把它一起删掉；含系统提示词头的第一轮不能整轮删除。
 - 宿主侧插件树仅在 DSH 启动时加载：安装、更新插件后必须完全重启 DSH。
 
 ### 更新日志
+
+**0.1.11** —— 整轮删除改为单次范围替换（移除 `mode: 'splice'` 的重放实现）。三种原 mode 一个字节未改。
+
+- 入口不变（用户消息行上第二个按钮，文案改为「删除这一轮」），删除只做一次普通的 `replace`：窗口 = 这一轮自己的全部表面节点，后面的轮次原地保留，**不重放、不重编号、不碰代理循环**。
+- 「接上后面」过去靠重放后续轮次；现在后续轮本就不动，所以对话视图与模型上下文的结果一致，而日志更小、轮号不再被抬高。
+- 移除 `buildSpliceReplayWrites`、`planSplice`、`spliceableSeqs`、`syncLoopTurn` 与响应里的 `spliceId`/`replayTurns`/`sync`；`/state` 的 `spliceSeqs` 更名为 `turnSeqs`（由 `turnableSeqs` 广告，逻辑不变：广告即承诺）。
+- 兼容性不变：载体仍是 `plugin:dsh-delete-turn` + 无可读内容，dsh-rerun-turn 仍把它认作「已退役的提问」。
+- **English**: the whole-turn delete is now a single ordinary range replace (`mode: 'turn'`): window = the turn's own surface nodes, one turn-less carrier, later turns untouched — no replay, no renumbering, no loop counter. `buildSpliceReplayWrites` / `planSplice` / `spliceableSeqs` / `syncLoopTurn` are gone; `/state` advertises `turnSeqs`. Carrier interop with dsh-rerun-turn is unchanged.
 
 **0.1.9** —— 新动作：整轮删除并接上后面（`mode: 'splice'`）。现有三种 mode 的行为一个字节未改。
 
@@ -185,13 +188,13 @@ This plugin puts deletion back on the message itself:
 - user message → remove that one message;
 - reasoning card / tool card → remove that step (the step's `assistant/message` and the `tool/result` it requested leave together, so tool pairs never dangle);
 - assistant reply (official action strip) → remove the whole reply attempt with its reasoning, tool calls and injected context (your prompt stays);
-- user message → a second entry: **delete this whole turn (prompt included) and close the gap** (below);
+- user message → a second entry: **delete this whole turn (prompt, injected context and every reply step included)**;
 - injected-context rows and failed-turn rows get an entry too.
 
 ### Features
 
 - **Context-level delete** — appends the official `surfaceOp: { op: 'replace', startSeq, endSeq }` intent; shadowed content no longer reaches `deriveMessages()`. Same contract as `/compact`.
-- **Turn delete + splice (new)** — remove one whole turn (**your prompt included**) and replay every later turn back as fresh events under new consecutive turn numbers: the transcript closes the gap where the turn stood, and the model reads the same closed-up history.
+- **Turn delete (new)** — remove one whole turn (**your prompt included**, plus its injected context and every reply step and tool result) as one ordinary range replace: the later turns stay exactly where they are, under their own numbers — no replay, no renumbering, one extra event.
 - **Transcript-level hide** — rows are located through official `data-chat-flow-*` anchors and the official `useChat` snapshot, then collapse out. The hide survives a reload, a DSH restart and other tabs.
 - **The log is the ledger** — hidden seqs are re-derived from the replacement events themselves (their message source is marked with this plugin), so there is no localStorage sidecar, no preflight, and no confusion with compaction replacements.
 - **Native look** — official primitives (Modal / Button) and theme tokens; icon and all copy are original.
@@ -252,15 +255,11 @@ Browser:
   useChat snapshot maps data-chat-flow-key to nodes; hidden seqs collapse rows
   GET /dsh-delete-turn/state rebuilds the hidden set on every session open
 
-Turn delete + splice (mode: 'splice'):
-  ONE surface replace over the window "this turn's first node → the last surface node"
-  (the deleted turn and every later turn's nodes are shadowed, so no stale copy is left)
-  then every later turn is replayed event by event: fresh turn numbers (from the log's
-  nextTurn), fresh ids, sourceEventSeqs remapped onto the copies, usage and embedded
-  streams dropped, tool calls copied only as complete pairs, TOOL_NOT_STARTED repairs
-  kept in their exact shape, system messages and log-only records skipped
-  in the same tick as the last write, the loop's idle turn counter is re-pointed at the
-  log's true last turn
+Turn delete (mode: 'turn'):
+  ONE ordinary surface replace over this turn's own surface nodes
+  (prompt + injected context + every step's assistant/message and tool/result)
+  landing one turn-less carrier; later turns keep their place and their numbers
+  - no replay, no renumbering, no loop state touched, one extra event
 ```
 
 Design notes:
@@ -268,9 +267,8 @@ Design notes:
 - **Why the carrier is a turn-less zero-width user message (never open a synthetic turn)**: the replacement carrier can only be a **`user/message` with no turn bracket**. Opening a synthetic turn+step to host a model-invisible empty `system/message` **corrupts the log**: the agent loop advances its turn counter only from the turns it opens itself, so its next real turn reuses the number this plugin burned (`turn/start does not open the expected turn` on the next cold read), and any turn-number-keyed client hiding then swallows that reused real turn — reproduced in production as messages “being eaten”. The carrier therefore stays turn-less, with a single **zero-width space**: truly empty content is refused by the gateway with 400 `user message must have content`, and a readable marker gets quoted back by the model; a zero-width space is non-empty for every validator and carries no literal text. The cost: the model may read it as one blank user message. Bookkeeping turns already written to historical logs (older versions) are hidden client-side via `markerTurns` from `/state`.
 - **Why no React fiber or CSS-module hashing**: rows are addressed through official `data-chat-flow-*` anchors and the official `useChat` standard hook, so a host UI refactor cannot silently detach the actions.
 - **Why a reload stays hidden**: the ledger is not browser state; it is a replay of the replacement events in the log, rebuilt by the host `/state` route.
-- **Why a spliced turn can only move UP the log's numbering**: the session format (`dsh-session-format-v3-to-v4`) requires `turn/start` to carry the log's `nextTurn` (one per `turn/end`), so a replayed turn **cannot** reuse its original number — it takes the next one. The conversation view draws folded messages and no numbers, so deleting B out of A/B/C/D leaves exactly A, C and D on screen; the log's own numbering stays monotonic (the trajectory view draws those numbers — see the limitations).
-- **Why the replay copies dsh-rerun-turn's machinery**: the infix-rerun plugin already proved "shadow + event-by-event replay" in production (fresh turn numbers, fresh ids, remapped `sourceEventSeqs`, faithful `TOOL_NOT_STARTED`, `usage`/stream dropped). The two repositories are independent, so this is a **copy of that implementation rather than a cross-package import** (`buildSpliceReplayWrites` is equivalent to `buildReplayWrites`), and the source comments name the correspondence. The one addition: a step that held nothing but a system message is dropped and the surviving steps are renumbered from 1 (otherwise the transcript would draw an empty process row).
-- **Advertised = accepted**: `/state` publishes `spliceSeqs` (the rows that can be spliced right now), computed by the SAME window check the route plans with (`spliceableSeqs` and `planSplice` share `spliceWindow`), so an entry can never become a click that is bound to fail.
+- **A turn delete neither replays nor renumbers**: it shadows this turn's own surface nodes and nothing else, so the log's numbering, every later turn's content and their references to other events are untouched — and no cross-turn operation is needed.
+- **Advertised = accepted**: `/state` publishes `turnSeqs` (the rows that can be turn-deleted right now), computed by the SAME function the route plans with (`turnableSeqs` tries `planRange` on each candidate), so an entry can never become a click that is bound to fail.
 
 ### Known limitations
 
@@ -280,10 +278,8 @@ Design notes:
 - The assistant action strip deletes the whole reply attempt; use the reasoning/tool card to remove a single step.
 - The process/disclosure row (“Thinking”, “N s”) carries no entry of its own: its scope is the whole reply, which the action strip already covers, so the duplicate was removed.
 - Content already removed from the model context by official compaction (`/compact`) no longer offers a delete action: it is not in the context any more and the transcript keeps it on purpose.
-- **A turn delete never lowers the log's turn numbers (the trajectory view shows it)**: a replayed turn takes the log's **next** number (delete B out of A/B/C/D and the replayed C and D become 5 and 6), because the format requires `turn/start` to be `nextTurn`. The conversation view draws folded messages and no numbers, so it shows A, C and D; the **trajectory view is keyed by the log's turn numbers** and will show 1, 2, 3, 4, 5, 6 there. What the shadowed turn itself renders as in the trajectory depends on whether that view is a ledger or a fold — this was **not measured here**, so do not infer it.
 - **A turn delete also removes YOUR prompt**: it deletes the whole turn (prompt + injected context + every reply step). To remove only the reply use the assistant action strip; to remove only the prompt use the trash action on the user row.
-- Replayed copies are **lossy**: `usage` and embedded streams are dropped (token statistics must not double count), system messages are not copied (the loop re-injects the system prompt itself), log-only records (attempts, retries, inbox splices, dispatches, workspace/todo bookkeeping) are not copied, and the tools of a replayed turn are **not executed again** (their results are copied as they were).
-- If the tail holds a **foreign turn-less node that is not a carrier** (an injected context row, say), the turn delete refuses outright (`range-not-clean`) instead of silently retiring it; the first turn, which holds the system-prompt head, cannot be spliced at all.
+- If the turn's window holds a node that is neither this plugin's placeholder nor a silent carrier (some readable injected content, say), the turn delete refuses outright (`range-not-clean`) instead of silently retiring it; the first turn, which holds the system-prompt head, cannot be turn-deleted at all.
 - The host plugin tree loads at DSH startup only: fully restart DSH after installing or updating the plugin.
 
 ### Verification (how to reproduce the claims above)

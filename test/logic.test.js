@@ -7,13 +7,11 @@ import {
   deletableReplyTurns,
   foldSurface,
   hiddenEntries,
-  buildSpliceReplayWrites,
   isBusy,
   messageIdOf,
   planRange,
-  planSplice,
   sourceOwnsPlugin,
-  spliceableSeqs,
+  turnableSeqs,
 } from '../src/logic.js'
 
 let clock = 0
@@ -115,10 +113,34 @@ test('foldSurface follows append and replace operations', () => {
 })
 
 test('hiddenEntries infers the deletion mode and ignores foreign producers', () => {
-  const log = baseLog()
-  const step = deletionReplacement(15, [6, 7])
-  const message = deletionReplacement(16, [5])
-  const reply = deletionReplacement(17, [12, 13])
+  const step = hiddenEntries([...baseLog(), deletionReplacement(15, [6, 7])])
+  assert.deepEqual(step, [
+    { seq: 6, mode: 'step', replacement: 15 },
+    { seq: 7, mode: 'step', replacement: 15 },
+  ])
+
+  const message = hiddenEntries([...baseLog(), deletionReplacement(15, [5])])
+  assert.deepEqual(message, [{ seq: 5, mode: 'message', replacement: 15 }])
+
+  // A reply window holds no human prompt and no single step.
+  const reply = hiddenEntries([...baseLog(), deletionReplacement(15, [6, 7, 8])])
+  assert.deepEqual(reply, [
+    { seq: 6, mode: 'reply', replacement: 15 },
+    { seq: 7, mode: 'reply', replacement: 15 },
+    { seq: 8, mode: 'reply', replacement: 15 },
+  ])
+
+  // A window carrying the turn's own human prompt is a whole-turn delete.
+  const turn = hiddenEntries([...baseLog(), deletionReplacement(15, [4, 5, 6, 7, 8])])
+  assert.deepEqual(turn, [
+    { seq: 4, mode: 'turn', replacement: 15 },
+    { seq: 5, mode: 'turn', replacement: 15 },
+    { seq: 6, mode: 'turn', replacement: 15 },
+    { seq: 7, mode: 'turn', replacement: 15 },
+    { seq: 8, mode: 'turn', replacement: 15 },
+  ])
+
+  // A replacement landed by any other producer is ignored.
   const foreign = event(
     18,
     'user/message',
@@ -130,14 +152,7 @@ test('hiddenEntries infers the deletion mode and ignores foreign producers', () 
     },
     { surfaceOp: { op: 'replace', startSeq: 4, endSeq: 4 }, sourceEventSeqs: [4] },
   )
-  const entries = hiddenEntries([...log, step, message, reply, foreign])
-  assert.deepEqual(entries, [
-    { seq: 6, mode: 'step', replacement: 15 },
-    { seq: 7, mode: 'step', replacement: 15 },
-    { seq: 5, mode: 'message', replacement: 16 },
-    { seq: 12, mode: 'reply', replacement: 17 },
-    { seq: 13, mode: 'reply', replacement: 17 },
-  ])
+  assert.deepEqual(hiddenEntries([...baseLog(), foreign]), [])
 })
 
 test('message plan replaces exactly the addressed user message', () => {
@@ -361,7 +376,7 @@ test('contentEditPairs ignores rollbacks, compaction checkpoints and own deletio
   assert.deepEqual(contentEditPairs(foldSurface(ownLog), ownLog), [])
 })
 
-// --- splice: delete a turn and replay everything after it ---------------------
+// --- turn: delete one whole turn as a single range replace -------------------
 
 // A four-turn log: turn 2 carries an injected context row, turn 3 a complete
 // tool pair, turn 4 a re-injected system message (which never travels).
@@ -386,11 +401,9 @@ function fourTurnLog() {
     event(15, 'turn/start', { turn: 3 }),
     event(16, 'step/start', { turn: 3, step: 1 }),
     userMessage(17, 'u-3'),
-    assistantMessage(18, 'a-3', 3, 1, { message: { id: 'a-3', role: 'assistant', content: [{ type: 'text', text: 'a-3' }, { type: 'tool-call', id: 'call-3', name: 'run_code', arguments: '{}' }], source: { kind: 'model', provider: 'p', model: 'm' } }, usage: { input: 10, output: 2 } }),
+    assistantMessage(18, 'a-3', 3, 1),
     event(19, 'tool/call', { turn: 3, step: 1, callId: 'call-3', name: 'run_code', arguments: '{}' }),
-    // Real v4 logs cite the tool CALL from the result; the copy must be remapped
-    // onto the copied call rather than onto the assistant message.
-    toolResult(20, 't-3', 3, 1, 'call-3', { sourceEventSeqs: [19] }),
+    toolResult(20, 't-3', 3, 1, 'call-3'),
     event(21, 'step/end', { turn: 3, step: 1 }),
     event(22, 'turn/end', { turn: 3 }),
     event(23, 'turn/start', { turn: 4 }),
@@ -403,244 +416,131 @@ function fourTurnLog() {
   ]
 }
 
-// Append the writes the way the host does: predicted seqs, carrier first.
-function landWrites(log, carrier, writes, startSeq) {
-  const out = [...log, carrier]
-  writes.forEach((write, index) => {
-    out.push({
-      type: write.type,
-      seq: startSeq + index,
-      time: 1000 + startSeq + index,
-      data: write.data,
-      ...(write.surfaceOp === undefined ? {} : { surfaceOp: write.surfaceOp }),
-      ...(write.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: write.sourceEventSeqs }),
-    })
-  })
-  return out
-}
-
-function carrierFor(plan, source, content) {
-  return {
-    type: 'user/message',
-    seq: 100,
-    time: 999,
-    data: { id: 'splice-carrier', role: 'user', content, source },
-    surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
-    sourceEventSeqs: plan.shadowed,
-  }
-}
-
-test('a splice plans the deleted turn plus every later turn as a renumbered replay', () => {
+test('a turn plan replaces every live surface node of the addressed turn', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
   assert.deepEqual(nodes, [3, 4, 5, 10, 11, 12, 17, 18, 20, 25, 26, 27])
-
-  const plan = planSplice(log, nodes, { seq: 10 })
-  assert.equal(plan.mode, 'splice')
-  assert.equal(plan.turn, 2)
-  // The window runs from the deleted turn's prompt to the LAST surface node, so
-  // no node of a later turn is left behind for the replay to duplicate.
-  assert.deepEqual(plan.shadowed, [10, 11, 12, 17, 18, 20, 25, 26, 27])
-  assert.equal(plan.startSeq, 10)
-  assert.equal(plan.endSeq, 27)
-  assert.deepEqual(plan.replayTurns, [3, 4])
-  assert.equal(plan.baseTurn, 5)
-  assert.deepEqual(plan.replay, [
-    { turn: 3, startSeq: 15, endSeq: 22, shadowed: [17, 18, 20] },
-    { turn: 4, startSeq: 23, endSeq: 29, shadowed: [26, 27] },
-  ])
-  // The walk ends at the last replayed bracket, not at its last surface node.
-  assert.equal(plan.logFrom, 15)
-  assert.equal(plan.logTo, 29)
+  assert.deepEqual(planRange(log, nodes, { mode: 'turn', seq: 10 }), {
+    mode: 'turn',
+    targetSeq: 10,
+    startSeq: 10,
+    endSeq: 12,
+    shadowed: [10, 11, 12],
+    turn: 2,
+    step: 1,
+  })
 })
 
-test('a splice addressed by turn or message id plans the same window', () => {
+test('a turn plan is addressable by seq, message id and turn number', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
-  const bySeq = planSplice(log, nodes, { mode: 'splice', seq: 18 })
-  const byId = planSplice(log, nodes, { mode: 'splice', messageId: 'a-3' })
-  const byTurn = planSplice(log, nodes, { mode: 'splice', turn: 3 })
-  assert.deepEqual(bySeq.shadowed, [17, 18, 20, 25, 26, 27])
-  assert.deepEqual(byId.shadowed, bySeq.shadowed)
-  assert.deepEqual(byTurn.shadowed, [17, 18, 20, 25, 26, 27])
-  assert.equal(byTurn.turn, 3)
-  assert.deepEqual(byTurn.replayTurns, [4])
+  const bySeq = planRange(log, nodes, { mode: 'turn', seq: 18 })
+  const byId = planRange(log, nodes, { mode: 'turn', messageId: 'a-3' })
+  const byTurn = planRange(log, nodes, { mode: 'turn', turn: 4 })
+  assert.deepEqual(bySeq.shadowed, [17, 18, 20])
+  assert.deepEqual(byId.shadowed, [17, 18, 20])
+  assert.deepEqual(byTurn.shadowed, [26, 27])
+  assert.equal(bySeq.turn, 3)
+  assert.equal(byTurn.turn, 4)
 })
 
-test('the replay copies renumber turns, remap sources and drop usage and streams', () => {
+test('landing a turn replace leaves every later turn exactly in place', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
-  const plan = planSplice(log, nodes, { mode: 'splice', turn: 2 })
-  const writes = buildSpliceReplayWrites(log, plan, 'splice-1', 101)
-  assert.deepEqual(
-    writes.map((write) => write.type),
-    ['turn/start', 'step/start', 'user/message', 'assistant/message', 'tool/call', 'tool/result', 'step/end', 'turn/end', 'turn/start', 'step/start', 'user/message', 'assistant/message', 'step/end', 'turn/end'],
-  )
-  // Fresh consecutive turn numbers starting at the format's next turn.
-  assert.deepEqual(
-    writes.filter((write) => write.type === 'turn/start').map((write) => write.data.turn),
-    [5, 6],
-  )
-  assert.deepEqual(
-    writes.filter((write) => write.type === 'turn/end').map((write) => write.data.turn),
-    [5, 6],
-  )
-  // The re-injected system message inside turn 4 does not travel.
-  assert.equal(writes.some((write) => write.type === 'system/message'), false)
-  const copy = writes[3]
-  assert.equal(copy.data.turn, 5)
-  assert.equal(copy.data.stream.length, 0)
-  assert.equal(Object.hasOwn(copy.data, 'usage'), false)
-  assert.equal(copy.data.message.id !== 'a-3', true)
-  assert.deepEqual(copy.data.message.source, { kind: 'model', provider: 'p', model: 'm', spliceBy: PLUGIN_ID, spliceId: 'splice-1', originalSeq: 18 })
-  // The tool pair travels complete, and the result cites the COPIED call.
-  const call = writes[4]
-  const result = writes[5]
-  assert.equal(call.data.callId, 'call-3')
-  assert.deepEqual(result.sourceEventSeqs, [105])
-  assert.equal(result.surfaceOp, 'append')
-  assert.equal(copy.data.message.content.some((block) => block.type === 'tool-call'), true)
-})
-
-test('folding a splice leaves A, the carrier and the replayed C and D only', () => {
-  const log = fourTurnLog()
-  const nodes = foldSurface(log).nodes
-  const plan = planSplice(log, nodes, { mode: 'splice', turn: 2 })
-  const carrier = carrierFor(plan, { kind: `plugin:${PLUGIN_ID}` }, [])
-  const writes = buildSpliceReplayWrites(log, plan, 'splice-1', 101)
-  const landed = landWrites(log, carrier, writes, 101)
-  const landedNodes = foldSurface(landed).nodes
-
-  // The carrier stands where the whole retired window was; the copies follow.
-  const copies = landedNodes.slice(landedNodes.indexOf(100) + 1)
-  assert.deepEqual(landedNodes.slice(0, landedNodes.indexOf(100) + 1), [3, 4, 5, 100])
-  const textOf = (seq) => {
-    const event = landed.find((item) => item.seq === seq)
-    const data = event.data
-    const message = event.type === 'user/message' ? data : data.message
-    return message.content.map((block) => block.text || block.type).join('|')
+  const plan = planRange(log, nodes, { mode: 'turn', seq: 10 })
+  const carrier = {
+    type: 'user/message',
+    seq: 100,
+    time: 999,
+    data: { id: 'turn-carrier', role: 'user', content: [], source: { kind: `plugin:${PLUGIN_ID}` } },
+    surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+    sourceEventSeqs: plan.shadowed,
   }
-  assert.deepEqual(copies.map(textOf), ['u-3', 'a-3|tool-call', 'tool_result', 'u-4', 'a-4'])
-  // Nothing the window shadowed is still on the surface, and the deleted turn
-  // contributes no node of its own: the view is A, C' and D'.
-  for (const seq of plan.shadowed) assert.equal(landedNodes.includes(seq), false, `seq ${seq} must leave the surface`)
-  const visible = landedNodes
-    .map((seq) => landed.find((item) => item.seq === seq))
-    .filter((event) => event.type === 'user/message' && event.data.source.kind === 'user')
-    .map((event) => event.data.content.map((block) => block.text).join(''))
-  assert.deepEqual(visible, ['u-1', 'u-3', 'u-4'])
+  const landed = [...log, carrier]
+  // The carrier stands where turn 2 stood; turns 3 and 4 are untouched, and no
+  // event was appended for them - no replay, no renumbering.
+  assert.deepEqual(foldSurface(landed).nodes, [3, 4, 5, 100, 17, 18, 20, 25, 26, 27])
+  assert.equal(landed.filter((event) => event.type === 'turn/start').length, 4)
+  // The ledger reads the landed window back as a whole-turn delete.
+  assert.deepEqual(hiddenEntries(landed), [
+    { seq: 10, mode: 'turn', replacement: 100 },
+    { seq: 11, mode: 'turn', replacement: 100 },
+    { seq: 12, mode: 'turn', replacement: 100 },
+  ])
 })
 
-test('the negative control: shadowing only the deleted turn duplicates the tail', () => {
-  // This is the shape a splice must never land: the deleted turn alone leaves
-  // the originals of C and D on the surface, so the copies duplicate them.
-  const log = fourTurnLog()
+test('a turn plan rides over this plugin own placeholder inside its window', () => {
+  const log = [...fourTurnLog(), deletionReplacement(30, [11])]
   const nodes = foldSurface(log).nodes
-  const plan = planSplice(log, nodes, { mode: 'splice', turn: 2 })
-  const narrow = { ...plan, startSeq: 10, endSeq: 12, shadowed: [10, 11, 12] }
-  const carrier = carrierFor(narrow, { kind: `plugin:${PLUGIN_ID}` }, [])
-  const writes = buildSpliceReplayWrites(log, plan, 'splice-1', 101)
-  const landedNodes = foldSurface(landWrites(log, carrier, writes, 101)).nodes
-  const landed = landWrites(log, carrier, writes, 101)
-  const visible = landedNodes
-    .map((seq) => landed.find((item) => item.seq === seq))
-    .filter((event) => event.type === 'user/message' && event.data.source && event.data.source.kind === 'user')
-    .map((event) => event.data.content.map((block) => block.text).join(''))
-  assert.deepEqual(visible, ['u-1', 'u-3', 'u-4', 'u-3', 'u-4'])
+  assert.deepEqual(nodes, [3, 4, 5, 10, 30, 12, 17, 18, 20, 25, 26, 27])
+  const plan = planRange(log, nodes, { mode: 'turn', seq: 10 })
+  assert.deepEqual(plan.shadowed, [10, 30, 12])
 })
 
-test('a splice refuses a window holding a node of no replayed turn', () => {
-  const log = fourTurnLog()
+test('a turn plan refuses a window holding a foreign node', () => {
   const foreign = event(
     30,
     'user/message',
-    { id: 'ctx-foreign', role: 'user', content: [{ type: 'text', text: 'injected' }], source: { kind: 'plugin:somebody-else' } },
-    { surfaceOp: 'append' },
+    { id: 'compact-1', role: 'user', content: [{ type: 'text', text: 'compacted' }], source: { kind: 'plugin:compact' } },
+    { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
-  const withForeign = [...log, foreign]
-  const nodes = foldSurface(withForeign).nodes
-  // The foreign node is turn-less, so the window cannot be reproduced by a
-  // replay: refuse rather than retire content the user never aimed at.
+  const withForeign = [...fourTurnLog(), foreign]
   assert.throws(
-    () => planSplice(withForeign, nodes, { mode: 'splice', turn: 2 }),
+    () => planRange(withForeign, foldSurface(withForeign).nodes, { mode: 'turn', seq: 10 }),
     (error) => error instanceof PlanError && error.code === 'range-not-clean',
   )
-  // A SILENT carrier of another plugin carries no model-visible content, so it
-  // rides along in the window instead of refusing it (the ecosystem convention
-  // dsh-rerun-turn documents: a plugin source kind plus empty content).
+  // A SILENT carrier of another plugin (plugin source plus no readable content)
+  // carries nothing, so it rides along instead of refusing the window.
   const silent = event(
     30,
     'user/message',
     { id: 'carrier-other', role: 'user', content: [], source: { kind: 'plugin:dsh-rerun-turn' } },
-    { surfaceOp: 'append' },
+    { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
-  const withCarrier = [...log, silent]
-  const carrierNodes = foldSurface(withCarrier).nodes
-  const plan = planSplice(withCarrier, carrierNodes, { mode: 'splice', turn: 2 })
-  assert.equal(plan.shadowed.includes(30), true)
-  assert.equal(plan.shadowed.includes(10), true)
-  assert.deepEqual(plan.replayTurns, [3, 4])
+  const withCarrier = [...fourTurnLog(), silent]
+  const plan = planRange(withCarrier, foldSurface(withCarrier).nodes, { mode: 'turn', seq: 10 })
+  assert.deepEqual(plan.shadowed, [10, 30, 12])
 })
 
-test('a splice cannot delete the turn holding the system prompt head', () => {
+test('a turn plan cannot remove the turn holding the system prompt head', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
   assert.throws(
-    () => planSplice(log, nodes, { mode: 'splice', turn: 1 }),
+    () => planRange(log, nodes, { mode: 'turn', turn: 1 }),
     (error) => error instanceof PlanError && error.code === 'not-deletable',
   )
   assert.throws(
-    () => planSplice(log, nodes, { mode: 'splice', seq: 3 }),
+    () => planRange(log, nodes, { mode: 'turn', seq: 3 }),
     (error) => error instanceof PlanError && error.code === 'not-deletable',
   )
 })
 
-test('a splice on the last turn deletes it without a replay', () => {
-  const log = fourTurnLog()
-  const nodes = foldSurface(log).nodes
-  const plan = planSplice(log, nodes, { mode: 'splice', turn: 4 })
-  assert.deepEqual(plan.shadowed, [25, 26, 27])
-  assert.deepEqual(plan.replayTurns, [])
-  assert.deepEqual(buildSpliceReplayWrites(log, plan, 'splice-1', 101), [])
-  assert.equal(plan.baseTurn, 5)
-})
-
-test('a splice refuses a target that already left the surface', () => {
-  const log = [...fourTurnLog(), deletionReplacement(30, [26], V4_SOURCE)]
-  const nodes = foldSurface(log).nodes
-  assert.throws(
-    () => planSplice(log, nodes, { mode: 'splice', seq: 26 }),
-    (error) => error instanceof PlanError && error.code === 'already-deleted',
-  )
-})
-
-test('spliceableSeqs advertises exactly what planSplice accepts', () => {
+test('turnableSeqs advertises exactly what the planner accepts', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
   // Every live human prompt except the first turn's (it holds the system head).
-  assert.deepEqual(spliceableSeqs(log, nodes), [10, 17, 26])
-  for (const seq of spliceableSeqs(log, nodes)) {
-    assert.doesNotThrow(() => planSplice(log, nodes, { mode: 'splice', seq }), `advertised seq ${seq} must plan`)
+  assert.deepEqual(turnableSeqs(log, nodes), [10, 17, 26])
+  for (const seq of turnableSeqs(log, nodes)) {
+    assert.doesNotThrow(() => planRange(log, nodes, { mode: 'turn', seq }), `advertised seq ${seq} must plan`)
   }
   // The first turn holds the protected system head: no entry, and the route refuses.
   assert.throws(
-    () => planSplice(log, nodes, { mode: 'splice', seq: 4 }),
+    () => planRange(log, nodes, { mode: 'turn', seq: 4 }),
     (error) => error instanceof PlanError && error.code === 'not-deletable',
   )
   // An injected context row is not an ANCHOR (the entry lives on prompts) but its
   // turn's window is the same one, so addressing it plans identically.
-  assert.equal(spliceableSeqs(log, nodes).includes(11), false, 'a context row is not advertised')
-  assert.deepEqual(planSplice(log, nodes, { mode: 'splice', seq: 11 }).shadowed, planSplice(log, nodes, { mode: 'splice', seq: 10 }).shadowed)
+  assert.equal(turnableSeqs(log, nodes).includes(11), false, 'a context row is not advertised')
+  assert.deepEqual(planRange(log, nodes, { mode: 'turn', seq: 11 }).shadowed, planRange(log, nodes, { mode: 'turn', seq: 10 }).shadowed)
 })
 
-test('spliceableSeqs withholds every prompt once a foreign node blocks the tail', () => {
-  const log = fourTurnLog()
-  const foreign = event(30, 'user/message', { id: 'ctx-foreign', role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin:other' } }, { surfaceOp: 'append' })
-  const withForeign = [...log, foreign]
-  const nodes = foldSurface(withForeign).nodes
-  assert.deepEqual(spliceableSeqs(withForeign, nodes), [])
-  // A silent carrier of another plugin does not block anything.
-  const silent = event(30, 'user/message', { id: 'carrier-other', role: 'user', content: [], source: { kind: 'plugin:dsh-rerun-turn' } }, { surfaceOp: 'append' })
-  const withCarrier = [...log, silent]
-  assert.deepEqual(spliceableSeqs(withCarrier, foldSurface(withCarrier).nodes), [10, 17, 26])
+test('turnableSeqs withholds only the prompts whose window is blocked', () => {
+  const foreign = event(
+    30,
+    'user/message',
+    { id: 'ctx-foreign', role: 'user', content: [{ type: 'text', text: 'x' }], source: { kind: 'plugin:other' } },
+    { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
+  )
+  const withForeign = [...fourTurnLog(), foreign]
+  assert.deepEqual(turnableSeqs(withForeign, foldSurface(withForeign).nodes), [17, 26])
 })

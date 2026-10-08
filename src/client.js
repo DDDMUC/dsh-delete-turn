@@ -98,15 +98,15 @@ window.__ModuleLoader__.load({
 
     const zh = {
       'action.tooltip.message': '删除这条消息',
-      'action.tooltip.splice': '删除这一轮并接上后面',
+      'action.tooltip.turn': '删除这一轮',
       'action.tooltip.step': '删除这一步',
       'action.tooltip.reply': '删除这条回复',
       'dialog.title.message': '删除这条消息？',
-      'dialog.title.splice': '删除这一轮并接上后面？',
+      'dialog.title.turn': '删除这一轮？',
       'dialog.title.step': '删除这一步？',
       'dialog.title.reply': '删除这条回复？',
       'dialog.desc.message': '这条消息将从模型上下文中移除，并从当前转录中隐藏。原始会话日志保持不变。',
-      'dialog.desc.splice': '这一轮（含你的提问）会从模型上下文中移除；它之后的每一轮随后以新的连续轮号原样重放回来，所以对话视图里这一轮消失、后面的内容直接接上（轮号本身仍在日志里单调递增）。',
+      'dialog.desc.turn': '这一轮（含你的提问、注入上下文、全部回复与工具结果）将从模型上下文中移除；它之后的轮次原样保留，在对话视图里直接接上来。',
       'dialog.desc.step': '这一步的回复与它请求的工具结果将一并从模型上下文中移除，同一回合的其它步骤保留。',
       'dialog.desc.reply': '这条回复连同它的思考、工具调用与注入上下文将从模型上下文中移除，你的提问会保留。',
       'dialog.note': '删除只影响模型后续看到的内容，不会改写历史日志。',
@@ -134,15 +134,15 @@ window.__ModuleLoader__.load({
 
     const en = {
       'action.tooltip.message': 'Delete this message',
-      'action.tooltip.splice': 'Delete this turn and close the gap',
+      'action.tooltip.turn': 'Delete this turn',
       'action.tooltip.step': 'Delete this step',
       'action.tooltip.reply': 'Delete this reply',
       'dialog.title.message': 'Delete this message?',
-      'dialog.title.splice': 'Delete this turn and close the gap?',
+      'dialog.title.turn': 'Delete this turn?',
       'dialog.title.step': 'Delete this step?',
       'dialog.title.reply': 'Delete this reply?',
       'dialog.desc.message': 'This message leaves the model context and is hidden from the current transcript. The original session log stays untouched.',
-      'dialog.desc.splice': 'This turn (your prompt included) leaves the model context, and every later turn is replayed back unchanged under fresh consecutive turn numbers, so the transcript closes the gap where this turn stood (the log keeps its monotonic numbering).',
+      'dialog.desc.turn': 'This turn (your prompt, injected context, every reply step and tool result) leaves the model context. Later turns stay exactly where they are and simply move up in the transcript.',
       'dialog.desc.step': 'This step and the tool results it requested leave the model context together; other steps in the same turn stay.',
       'dialog.desc.reply': 'This reply leaves the model context together with its reasoning, tool calls and injected context; your prompt stays.',
       'dialog.note': 'Deletion only changes what the model sees next; the append-only log is never rewritten.',
@@ -185,16 +185,16 @@ window.__ModuleLoader__.load({
       '[data-variant="think"]:hover .dshdt-think-action,.dshdt-think-action:focus-within{opacity:1}',
       '.dshdt-collapsing{overflow:hidden;transition:height .2s ease,opacity .14s ease,margin .2s ease,padding .2s ease}',
       '[data-dshdt-hidden="1"]{display:none!important}',
-      // The second row action: delete the whole turn and splice the later turns
-      // back. It is its own class so the trash action's selector, its counts and
-      // the interop contract stay exactly as they were; the row attribute turns
-      // it on only where the host can plan the operation.
-      '.dshdt-splice{width:28px;height:28px;padding:6px;display:none;align-items:center;justify-content:center;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;transition:background-color .12s,color .12s}',
-      '[data-dshdt-splice="1"] .dshdt-splice{display:inline-flex}',
-      '.dshdt-splice:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
-      '.dshdt-splice:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
-      '.dshdt-splice:disabled{cursor:default;opacity:.4}',
-      '.dshdt-splice svg{width:15px;height:15px}',
+      // The second row action: delete the whole turn (prompt included). It is
+      // its own class so the trash action's selector, its counts and the
+      // interop contract stay exactly as they were; the row attribute turns it
+      // on only where the host can plan the operation.
+      '.dshdt-turn{width:28px;height:28px;padding:6px;display:none;align-items:center;justify-content:center;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;transition:background-color .12s,color .12s}',
+      '[data-dshdt-turn="1"] .dshdt-turn{display:inline-flex}',
+      '.dshdt-turn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
+      '.dshdt-turn:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
+      '.dshdt-turn:disabled{cursor:default;opacity:.4}',
+      '.dshdt-turn svg{width:15px;height:15px}',
       '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
       '.dshdt-dialog-text{margin:0;color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:22px}',
       '.dshdt-dialog-note{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
@@ -234,16 +234,16 @@ window.__ModuleLoader__.load({
 
     // Collapse glyph: a centre rail with one arrow above and one below, both
     // pointing at it - "the neighbours move up into this one's place".
-    const SPLICE_ICON_PATHS = [
+    const TURN_ICON_PATHS = [
       'M3.2 8h9.6',
       'M8 2.4v4',
       'M6.3 4.7L8 6.4l1.7-1.7',
       'M8 13.6v-4',
       'M6.3 11.3L8 9.6l1.7 1.7',
     ]
-    const SPLICE_ICON_MARKUP =
+    const TURN_ICON_MARKUP =
       '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
-      SPLICE_ICON_PATHS.map(
+      TURN_ICON_PATHS.map(
         (d) =>
           '<path d="' + d + '" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>',
       ).join('') +
@@ -277,7 +277,7 @@ window.__ModuleLoader__.load({
           surface: new Set(),
           // The seqs the host would accept a turn-delete for (advertised, not
           // guessed): the entry appears only on those rows.
-          spliceSeqs: new Set(),
+          turnSeqs: new Set(),
           replyTurns: new Set(),
           edits: new Map(),
           markerTurns: new Set(),
@@ -344,8 +344,8 @@ window.__ModuleLoader__.load({
             const hiddenVia = hiddenViaOf(data.hidden)
             const surface = new Set()
             for (const seq of Array.isArray(data.surface) ? data.surface : []) surface.add(seq)
-            const spliceSeqs = new Set()
-            for (const seq of Array.isArray(data.spliceSeqs) ? data.spliceSeqs : []) spliceSeqs.add(seq)
+            const turnSeqs = new Set()
+            for (const seq of Array.isArray(data.turnSeqs) ? data.turnSeqs : []) turnSeqs.add(seq)
             const replyTurns = new Set()
             for (const turn of Array.isArray(data.replyTurns) ? data.replyTurns : []) replyTurns.add(turn)
             const edits = new Map()
@@ -357,7 +357,7 @@ window.__ModuleLoader__.load({
               if (typeof turn === 'number') markerTurns.add(turn)
             }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, hiddenVia, surface, spliceSeqs, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, hiddenVia, surface, turnSeqs, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -503,14 +503,13 @@ window.__ModuleLoader__.load({
     }
 
     // The second entry: delete the WHOLE turn the row belongs to - the prompt
-    // included - and splice every later turn back under fresh turn numbers. Only
-    // a human prompt anchors it; an injected context row or a reply row is not
-    // the turn's own question.
-    function spliceTargetFor(node) {
+    // included - as one range replace. Only a human prompt anchors it; an
+    // injected context row or a reply row is not the turn's own question.
+    function turnTargetFor(node) {
       if (node.kind !== 'user') return null
       const data = node.data || {}
       const seq = typeof data.seq === 'number' ? data.seq : node.anchorSeq
-      return typeof seq === 'number' ? { mode: 'splice', seq, label: 'splice' } : null
+      return typeof seq === 'number' ? { mode: 'turn', seq, label: 'turn' } : null
     }
 
     function seqsFor(node) {
@@ -635,7 +634,7 @@ window.__ModuleLoader__.load({
     // does not, and a re-apply (HMR, plugin toggle, bundle-group reload) starts
     // with fresh module state over the very same page.
     const HOST_MARK = 'data-dshdt-action-host'
-    const SPLICE_CLASS = 'dshdt-splice'
+    const TURN_CLASS = 'dshdt-turn'
     const THINK_MARK = 'data-dshdt-think-action'
     const HOST_CLASS = 'dshdt-action-host'
     const THINK_CLASS = 'dshdt-think-action'
@@ -679,22 +678,22 @@ window.__ModuleLoader__.load({
         host.appendChild(button)
       }
       // The row host carries this plugin's second action as well: delete the
-      // whole turn and splice the later turns back. It rides in the SAME host -
+      // whole turn. It rides in the SAME host -
       // the trash action's namespace, its selector and its one-host-per-row
       // contract are untouched - under its own class, and the reasoning host
       // never gets one (a reasoning card owns no turn).
-      let splice = null
+      let turn = null
       if (kind !== 'think') {
-        splice = host.querySelector('.' + SPLICE_CLASS)
-        if (splice === null) {
-          splice = document.createElement('button')
-          splice.type = 'button'
-          splice.className = SPLICE_CLASS + ' dshdt-row-action'
-          splice.innerHTML = SPLICE_ICON_MARKUP
-          host.appendChild(splice)
+        turn = host.querySelector('.' + TURN_CLASS)
+        if (turn === null) {
+          turn = document.createElement('button')
+          turn.type = 'button'
+          turn.className = TURN_CLASS + ' dshdt-row-action'
+          turn.innerHTML = TURN_ICON_MARKUP
+          host.appendChild(turn)
         }
       }
-      return { host, button, splice }
+      return { host, button, turn }
     }
 
     // Drop every node this plugin injected. Matched through this plugin's own
@@ -783,7 +782,7 @@ window.__ModuleLoader__.load({
       rowActions.delete(row)
     }
 
-    function injectRowAction(row, node, target, spliceTarget, controller, t) {
+    function injectRowAction(row, node, target, turnTarget, controller, t) {
       const label = t(`action.tooltip.${target.label}`)
       let entry = rowActions.get(row)
       if (!entry) {
@@ -792,7 +791,7 @@ window.__ModuleLoader__.load({
         entry = adoptHost(findOwnedHost(row, false), 'row')
         rowActions.set(row, entry)
       }
-      const { host, button, splice } = entry
+      const { host, button, turn } = entry
       if (button.getAttribute('aria-label') !== label) {
         button.setAttribute('aria-label', label)
         button.setAttribute('title', label)
@@ -802,22 +801,22 @@ window.__ModuleLoader__.load({
         event.stopPropagation()
         controller.trigger(target)
       }
-      // The second action is wired only where a splice target exists (and stays
+      // The second action is wired only where a turn target exists (and stays
       // hidden by the row attribute otherwise), so a row can never offer an
       // operation the host would refuse for the wrong reason.
-      if (splice !== null && splice !== undefined) {
-        const spliceLabel = t('action.tooltip.splice')
-        if (splice.getAttribute('aria-label') !== spliceLabel) {
-          splice.setAttribute('aria-label', spliceLabel)
-          splice.setAttribute('title', spliceLabel)
+      if (turn !== null && turn !== undefined) {
+        const turnLabel = t('action.tooltip.turn')
+        if (turn.getAttribute('aria-label') !== turnLabel) {
+          turn.setAttribute('aria-label', turnLabel)
+          turn.setAttribute('title', turnLabel)
         }
-        splice.onclick =
-          spliceTarget === null || spliceTarget === undefined
+        turn.onclick =
+          turnTarget === null || turnTarget === undefined
             ? null
             : (event) => {
                 event.preventDefault()
                 event.stopPropagation()
-                controller.trigger(spliceTarget)
+                controller.trigger(turnTarget)
               }
       }
       const anchor = node.kind === 'user' || node.kind === 'steering' ? row.querySelector('[class*="_actions"]') : null
@@ -931,12 +930,12 @@ window.__ModuleLoader__.load({
         const deletable = !hidden && covered && rowDeletable(node, seqs, view)
         // The turn-delete entry rides on the same gates as the delete entry: a
         // row whose content already left the context offers neither.
-        const spliceTarget =
-          deletable && spliceTargetFor(node) !== null && view.spliceSeqs.has(target.seq) ? liveTarget(spliceTargetFor(node), view.edits) : null
-        if (deletable && target !== null) injectRowAction(row, node, target, spliceTarget, controller, t)
+        const turnTarget =
+          deletable && turnTargetFor(node) !== null && view.turnSeqs.has(target.seq) ? liveTarget(turnTargetFor(node), view.edits) : null
+        if (deletable && target !== null) injectRowAction(row, node, target, turnTarget, controller, t)
         else removeRowAction(row)
-        if (deletable && target !== null && spliceTarget !== null) row.dataset.dshdtSplice = '1'
-        else delete row.dataset.dshdtSplice
+        if (deletable && target !== null && turnTarget !== null) row.dataset.dshdtTurn = '1'
+        else delete row.dataset.dshdtTurn
         if (!hidden && covered && !rowDeletable(node, seqs, view)) row.dataset.dshdtNoTarget = '1'
         else delete row.dataset.dshdtNoTarget
       }

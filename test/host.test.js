@@ -168,11 +168,11 @@ test('the state route reports deletion bookkeeping turns', async () => {
   assert.deepEqual(payload.markerTurns, [2])
 })
 
-// --- the splice route --------------------------------------------------------
+// --- the turn route ----------------------------------------------------------
 
-// Four closed turns: A, B (with an injected context row), C, D. The tail after
-// the deleted turn is what a splice must replay.
-function spliceEvents() {
+// Four closed turns: A, B (with an injected context row), C, D. Deleting turn B
+// shadows only B's live nodes; C and D stay exactly where they are.
+function turnEvents() {
   const rows = []
   const push = (seq, type, data, extra) => rows.push({ seq, time: seq + 1, type, data, ...(extra || {}) })
   const user = (seq, id) => push(seq, 'user/message', { id, role: 'user', content: [{ type: 'text', text: id }], source: { kind: 'user' } }, { surfaceOp: 'append' })
@@ -191,9 +191,8 @@ function spliceEvents() {
   return rows
 }
 
-// A session whose log grows with every append (the real one's seq contract), so
-// the route's predicted-seq guard is exercised rather than bypassed.
-function spliceHarness(events, options = {}) {
+// A session whose log grows with every append (the real one's seq contract).
+function turnHarness(events, options = {}) {
   const calls = { appends: [], routes: new Map() }
   const log = [...events]
   const session = {
@@ -214,8 +213,6 @@ function spliceHarness(events, options = {}) {
       return landed
     },
   }
-  const turns = events.filter((event) => event.type === 'turn/start').map((event) => event.data.turn)
-  const agent = { session, phase: { kind: 'idle', lastTurn: Math.max(...turns) } }
   const webServer = { register(spec) { calls.routes.set(spec.path, spec); return () => {} } }
   const ctx = {
     effect: (fn) => fn(),
@@ -224,14 +221,13 @@ function spliceHarness(events, options = {}) {
       if (name === 'webServer') return webServer
       if (name === 'sessions') return { get: () => session, flush: async () => true }
       if (name === 'sessionQuery') return { readSession: async () => ({ events: log }) }
-      if (name === 'sessionController') return { resolveAgent: async () => ({ agent }) }
       return undefined
     },
   }
-  return { ctx, calls, session, agent, log }
+  return { ctx, calls, session, log }
 }
 
-async function postSplice(harness, body) {
+async function postDelete(harness, body) {
   apply(harness.ctx)
   const route = harness.calls.routes.get('/dsh-delete-turn/delete')
   assert.ok(route, 'the delete route must be registered')
@@ -240,82 +236,66 @@ async function postSplice(harness, body) {
   return { status: res.statusCode, payload: JSON.parse(res.body) }
 }
 
-test('the splice route appends one carrier and a renumbered replay of the tail', async () => {
-  const events = spliceEvents()
-  const harness = spliceHarness(events)
+test('the turn route lands one carrier and leaves the later turns in place', async () => {
+  const events = turnEvents()
+  const harness = turnHarness(events)
   const before = foldSurface(events).nodes
-  const { status, payload } = await postSplice(harness, { sessionId: SESSION_ID, mode: 'splice', turn: 2 })
+  const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
 
   assert.equal(status, 200)
   assert.equal(payload.ok, true)
-  assert.equal(payload.deletedTurn, 2)
-  assert.deepEqual(payload.replayTurns, [3, 4])
-  assert.equal(payload.baseTurn, 5)
-  assert.equal(payload.sync, 'synced')
-  assert.equal(harness.agent.phase.lastTurn, 6, 'the loop counter follows the replay')
   assert.deepEqual(before, [2, 3, 8, 9, 10, 15, 16, 21, 22])
-  assert.deepEqual(
-    payload.hidden.map((item) => item.seq),
-    [8, 9, 10, 15, 16, 21, 22],
-    'the window is the deleted turn plus the whole tail',
-  )
+  assert.deepEqual(payload.hidden, [
+    { seq: 8, mode: 'turn' },
+    { seq: 9, mode: 'turn' },
+    { seq: 10, mode: 'turn' },
+  ])
 
-  const [carrier, ...writes] = harness.calls.appends
+  // Exactly one write: the turn-less carrier. No turn border, no copy of C or D.
+  assert.equal(harness.calls.appends.length, 1)
+  const [carrier] = harness.calls.appends
   assert.equal(carrier.type, 'user/message')
   assert.equal(carrier.data.turn, undefined, 'the carrier never opens a turn')
-  assert.deepEqual(carrier.data.source.kind, 'plugin:dsh-delete-turn')
-  assert.equal(carrier.data.source.spliceId, payload.spliceId)
-  assert.deepEqual(carrier.intent.surfaceOp, { op: 'replace', startSeq: payload.hidden[0].seq, endSeq: payload.hidden[payload.hidden.length - 1].seq })
-  assert.deepEqual(carrier.intent.sourceEventSeqs, payload.hidden.map((item) => item.seq))
-  assert.equal(carrier.data.content.length <= 1, true)
+  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn' })
+  assert.deepEqual(carrier.intent.surfaceOp, { op: 'replace', startSeq: 8, endSeq: 10 })
+  assert.deepEqual(carrier.intent.sourceEventSeqs, [8, 9, 10])
+  assert.equal(payload.replacementSeq, 25)
 
-  // Every replayed surface event declares its surface intent, and every bracket
-  // carries the fresh numbers the format requires.
-  assert.deepEqual(
-    writes.filter((write) => write.type === 'turn/start').map((write) => write.data.turn),
-    [5, 6],
-  )
-  assert.deepEqual(
-    writes.filter((write) => write.type === 'turn/end').map((write) => write.data.turn),
-    [5, 6],
-  )
-  assert.deepEqual(
-    writes.filter((write) => write.type === 'user/message' || write.type === 'assistant/message').map((write) => write.intent.surfaceOp),
-    ['append', 'append', 'append', 'append'],
-  )
-  assert.equal(writes.some((write) => write.type === 'system/message'), false)
-  assert.equal(payload.replayed, writes.length)
+  // The folded surface after landing: A, the carrier, then C and D untouched.
+  assert.deepEqual(foldSurface(harness.log).nodes, [2, 3, 25, 15, 16, 21, 22])
 })
 
-test('the splice route refuses a busy session and an unknown mode', async () => {
-  const busy = [...spliceEvents(), { seq: 99, time: 99, type: 'turn/start', data: { turn: 5 } }]
-  const busyHarness = spliceHarness(busy)
-  const refused = await postSplice(busyHarness, { sessionId: SESSION_ID, mode: 'splice', turn: 2 })
+test('the turn route refuses a busy session, an unknown mode and the head turn', async () => {
+  const busy = [...turnEvents(), { seq: 99, time: 99, type: 'turn/start', data: { turn: 5 } }]
+  const busyHarness = turnHarness(busy)
+  const refused = await postDelete(busyHarness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
   assert.equal(refused.status, 409)
   assert.equal(refused.payload.code, 'busy')
   assert.equal(busyHarness.calls.appends.length, 0, 'a busy session is never written')
 
-  const idleHarness = spliceHarness(spliceEvents())
-  const invalid = await postSplice(idleHarness, { sessionId: SESSION_ID, mode: 'splice-turn', turn: 2 })
+  const idleHarness = turnHarness(turnEvents())
+  const invalid = await postDelete(idleHarness, { sessionId: SESSION_ID, mode: 'turnify', turn: 2 })
   assert.equal(invalid.status, 400)
   assert.equal(invalid.payload.code, 'invalid')
   assert.equal(idleHarness.calls.appends.length, 0)
+
+  // The first surface node belongs to turn 1: that turn may not be removed.
+  const headHarness = turnHarness(turnEvents())
+  const head = await postDelete(headHarness, { sessionId: SESSION_ID, mode: 'turn', turn: 1 })
+  assert.equal(head.status, 400)
+  assert.equal(head.payload.code, 'not-deletable')
 })
 
-test('a failing replay write is reported as stale after the carrier landed', async () => {
-  const harness = spliceHarness(spliceEvents(), { failOn: 'assistant/message' })
-  const { status, payload } = await postSplice(harness, { sessionId: SESSION_ID, mode: 'splice', turn: 2 })
+test('a refused carrier write is reported as stale and nothing lands', async () => {
+  const harness = turnHarness(turnEvents(), { failOn: 'user/message' })
+  const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
   assert.equal(status, 409)
   assert.equal(payload.code, 'stale')
-  // The carrier is committed and cannot be rolled back; the response says so
-  // instead of pretending the log is untouched.
-  assert.equal(harness.calls.appends[0].intent.surfaceOp.op, 'replace', 'the carrier went first')
-  assert.equal(harness.log.some((event) => event.surfaceOp && event.surfaceOp.op === 'replace'), true, 'the carrier is in the log')
-  assert.equal(harness.calls.appends.length, 4, 'the carrier, the bracket and the first copy landed')
+  assert.equal(harness.calls.appends.length, 0, 'the refused append never counted as landed')
 })
 
-test('the state route advertises the rows the splice route accepts', async () => {
-  const harness = spliceHarness(spliceEvents())
+test('the state route advertises the rows the turn route accepts', async () => {
+  const harness = turnHarness(turnEvents())
   apply(harness.ctx)
   const stateRoute = harness.calls.routes.get('/dsh-delete-turn/state')
   assert.ok(stateRoute, 'the state route must be registered')
@@ -325,9 +305,9 @@ test('the state route advertises the rows the splice route accepts', async () =>
   assert.equal(res.statusCode, 200)
   // The surface is [2, 3, 8, 9, 10, 15, 16, 21, 22]; the live human prompts are
   // 2 (the first turn, protected), 8, 15 and 21.
-  assert.deepEqual(payload.spliceSeqs, [8, 15, 21])
-  for (const seq of payload.spliceSeqs) {
-    const accepted = await postSplice(spliceHarness(spliceEvents()), { sessionId: SESSION_ID, mode: 'splice', seq })
+  assert.deepEqual(payload.turnSeqs, [8, 15, 21])
+  for (const seq of payload.turnSeqs) {
+    const accepted = await postDelete(turnHarness(turnEvents()), { sessionId: SESSION_ID, mode: 'turn', seq })
     assert.equal(accepted.status, 200, `an advertised seq must be accepted: ${seq}`)
   }
 })
