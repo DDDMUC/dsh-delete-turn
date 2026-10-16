@@ -889,11 +889,38 @@ window.__ModuleLoader__.load({
       return Boolean(closing && closing.finalNode && closing.finalNode.messageId !== undefined)
     }
 
+    // Node kinds that carry visible conversation content, and the turn-level
+    // disclosure rows that must go with them. A failure card ("处理失败"), a
+    // process disclosure ("已思考", "用时 N 秒"), a retry notice or a turn tail is
+    // drawn from the TURN, not from a surface node, so shadowing the nodes a
+    // delete aimed at leaves it behind - a deleted failed turn keeps an orphaned
+    // card. A turn is gone once none of its content rows is visible, and its
+    // disclosure rows leave with it.
+    const CONTENT_KINDS = new Set(['user', 'context', 'steering', 'tool-call', 'assistant-step'])
+    const DISCLOSURE_KINDS = new Set(['turn-error', 'model-retry', 'turn-tail', 'turn-process'])
+
     function applyDom(snapshot, view, controller, t) {
       if (!snapshot || !snapshot.nodes || typeof snapshot.nodes.get !== 'function') return
       const animate = controller.consumeAnimate()
       const rows = document.querySelectorAll('[data-chat-flow-key]')
       let maxSeq = -1
+
+      // Turns that still have a visible content row. Computed from the ledger
+      // (not from DOM heights) so it is stable across the pass.
+      const contentTurns = new Set()
+      for (const row of rows) {
+        const key = row.getAttribute('data-chat-flow-key')
+        if (!key) continue
+        const node = snapshot.nodes.get(key)
+        if (!node || !CONTENT_KINDS.has(node.kind)) continue
+        const turn = row.getAttribute('data-chat-turn')
+        if (turn === null || turn === '') continue
+        if (row.dataset.dshdtHidden === '1' || foreignHideOn(row, 'dshdt')) continue
+        const seqs = expandSeqs(seqsFor(node), view.edits)
+        if (isRowHidden(view.hidden, view.hiddenVia, seqs)) continue
+        contentTurns.add(turn)
+      }
+
       for (const row of rows) {
         if (!(row instanceof HTMLElement)) continue
         const key = row.getAttribute('data-chat-flow-key')
@@ -923,7 +950,10 @@ window.__ModuleLoader__.load({
         }
         const seqs = expandSeqs(seqsFor(node), view.edits)
         for (const seq of seqs) if (typeof seq === 'number' && seq > maxSeq) maxSeq = seq
-        const hidden = isRowHidden(view.hidden, view.hiddenVia, seqs)
+        // A disclosure row follows its turn: with no visible content row left,
+        // it is an orphan and leaves too.
+        const orphaned = DISCLOSURE_KINDS.has(node.kind) && turn !== null && turn !== '' && !contentTurns.has(turn)
+        const hidden = orphaned || isRowHidden(view.hidden, view.hiddenVia, seqs)
         setRowHidden(row, hidden, animate)
         const target = hidden ? null : liveTarget(targetFor(node), view.edits)
         const covered = target !== null || slotCoversRow(node)

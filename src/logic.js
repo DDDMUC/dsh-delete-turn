@@ -327,7 +327,9 @@ export function isOwnPlaceholder(event) {
  *     that step produced, so a tool_use/tool_result pair never splits;
  *   - `reply`: every surface node of the addressed turn after its last human
  *     prompt (injected context, assistant steps, tool results), so the
- *     question survives while the whole answer attempt leaves the context.
+ *     question survives while the whole answer attempt leaves the context;
+ *   - `turn`: every surface node of the addressed turn - its prompt, injected
+ *     context and whole reply - as one range (a whole-turn delete, no replay).
  *
  * The returned window is contiguous in surface order and contains no foreign
  * node, so the landed replacement cannot shadow content the user did not aim
@@ -467,18 +469,16 @@ export function planRange(events, surfaceNodes, request) {
   if (mode === 'turn') {
     const turn = target.data && typeof target.data.turn === 'number' ? target.data.turn : turnOf.get(targetSeq)
     if (typeof turn !== 'number') throw new PlanError('not-deletable', 'the target does not belong to a turn')
-    // Surface node 0 is the system prompt head, appended inside the first step of
-    // the first turn. That turn may not be removed as a whole: the head is the
-    // one node the official append contract lets nothing but a system/message
-    // rewrite, and the head must stay the head.
-    const head = bySeq.get(surfaceNodes[0])
-    const headTurn = head ? (head.data && typeof head.data.turn === 'number' ? head.data.turn : turnOf.get(surfaceNodes[0])) : undefined
-    if (headTurn === turn) throw new PlanError('not-deletable', 'the turn holding the system prompt head cannot be deleted')
     const members = []
     for (const seq of surfaceNodes) {
       const event = bySeq.get(seq)
-      // The system prompt head is never reply content (reply mode makes the same
-      // exclusion), and it is guarded above.
+      // The system prompt head is never conversation content (reply mode makes
+      // the same exclusion), so it is never a member and never anchors the
+      // window: the head node itself stays exactly where it is. This is also
+      // why the turn that introduced the head is deletable - the head is not
+      // part of its window, and the host rewrites the head every turn anyway
+      // (its own `turn` field names the turn it was last rewritten in, not the
+      // turn it was created in).
       if (!event || event.type === 'system/message') continue
       const eventTurn = event.data && typeof event.data.turn === 'number' ? event.data.turn : turnOf.get(seq)
       if (eventTurn !== turn) continue
@@ -487,6 +487,12 @@ export function planRange(events, surfaceNodes, request) {
     if (members.length === 0) throw new PlanError('nothing-to-delete', 'the turn has no surface content left')
     const startIdx = nodeIndex.get(members[0])
     const endIdx = nodeIndex.get(members[members.length - 1])
+    // Surface node 0 is the protected system prompt head: a replacement covering
+    // it would have to be a system/message over exactly that node, which a
+    // turn-less user carrier is not. The head is normally a system/message and
+    // so is excluded from the members above; this only fires when it is not
+    // node 0 at all (a shadowed head, say), keeping the window off node 0.
+    if (startIdx === 0) throw new PlanError('not-deletable', 'the window would cover the system prompt head')
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
     if (shadowed.some((seq) => !members.includes(seq) && !isOwnPlaceholder(bySeq.get(seq)) && !isSilentPluginCarrier(bySeq.get(seq)))) {
       throw new PlanError('range-not-clean', 'the turn window contains unrelated surface nodes')

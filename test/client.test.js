@@ -934,6 +934,48 @@ test('a second live instance adopts the turn-delete button inside the existing h
   assert.equal(second.controller.getSnapshot().dialog.mode, 'turn', 'the adopted button is rewired to this instance')
 })
 
+// --- a turn-level disclosure row follows its turn ---------------------------
+//
+// The failure card ("处理失败"), the process disclosure and the retry notice are
+// drawn from the TURN, not from a surface node: shadowing the nodes a delete
+// aimed at leaves them behind, so a deleted failed turn kept an orphaned card.
+
+function disclosureSnapshot() {
+  return {
+    nodes: new Map([
+      ['p9', { kind: 'user', data: { seq: 786 }, anchorSeq: 786 }],
+      ['e9', { kind: 'turn-error', data: { turn: 9 }, anchorSeq: 806 }],
+    ]),
+  }
+}
+
+test('a failure card is hidden once its turn has no visible content left', async () => {
+  const payload = { ok: true, hidden: [{ seq: 786, mode: 'turn', replacement: 809 }], surface: [809], replyTurns: [], edits: [], markerTurns: [], lastSeq: 809 }
+  const { env, render } = mountOverlay({ payload })
+  const prompt = env.addRow({ key: 'p9', turn: 9 })
+  const card = env.addRow({ key: 'e9', turn: 9 })
+
+  render(disclosureSnapshot())
+  await env.settle()
+  render(disclosureSnapshot())
+
+  assert.equal(prompt.dataset.dshdtHidden, '1', 'the deleted prompt is hidden')
+  assert.equal(card.dataset.dshdtHidden, '1', 'the orphaned failure card leaves with its turn')
+})
+
+test('a failure card stays while its turn still has a visible content row', async () => {
+  const { env, render } = mountOverlay()
+  const prompt = env.addRow({ key: 'p9', turn: 9 })
+  const card = env.addRow({ key: 'e9', turn: 9 })
+
+  render(disclosureSnapshot())
+  await env.settle()
+  render(disclosureSnapshot())
+
+  assert.equal(prompt.hasAttribute('data-dshdt-hidden'), false)
+  assert.equal(card.hasAttribute('data-dshdt-hidden'), false, 'a live turn keeps its failure card')
+})
+
 // --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
 
 function rowConfigEntry(env) {

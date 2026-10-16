@@ -279,7 +279,8 @@ test('the turn route refuses a busy session, an unknown mode and the head turn',
   assert.equal(invalid.payload.code, 'invalid')
   assert.equal(idleHarness.calls.appends.length, 0)
 
-  // The first surface node belongs to turn 1: that turn may not be removed.
+  // This log carries no system head, so turn 1's own prompt IS surface node 0:
+  // a window over it would cover node 0, which is refused.
   const headHarness = turnHarness(turnEvents())
   const head = await postDelete(headHarness, { sessionId: SESSION_ID, mode: 'turn', turn: 1 })
   assert.equal(head.status, 400)

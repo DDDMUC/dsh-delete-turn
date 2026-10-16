@@ -502,13 +502,17 @@ test('a turn plan refuses a window holding a foreign node', () => {
   assert.deepEqual(plan.shadowed, [10, 30, 12])
 })
 
-test('a turn plan cannot remove the turn holding the system prompt head', () => {
+test('a turn plan removes the first turn content but never the system head', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
-  assert.throws(
-    () => planRange(log, nodes, { mode: 'turn', turn: 1 }),
-    (error) => error instanceof PlanError && error.code === 'not-deletable',
-  )
+  // The head (seq 3) is a system/message, excluded from the window, so the
+  // first turn's conversation is removable while the head stays node 0. The
+  // host rewrites the head every turn, so its own `turn` field names the turn
+  // it was last rewritten in, never a reason to refuse that turn.
+  const plan = planRange(log, nodes, { mode: 'turn', turn: 1 })
+  assert.deepEqual(plan.shadowed, [4, 5])
+  assert.equal(plan.startSeq, 4)
+  // Addressing the head node itself is still refused.
   assert.throws(
     () => planRange(log, nodes, { mode: 'turn', seq: 3 }),
     (error) => error instanceof PlanError && error.code === 'not-deletable',
@@ -518,16 +522,12 @@ test('a turn plan cannot remove the turn holding the system prompt head', () => 
 test('turnableSeqs advertises exactly what the planner accepts', () => {
   const log = fourTurnLog()
   const nodes = foldSurface(log).nodes
-  // Every live human prompt except the first turn's (it holds the system head).
-  assert.deepEqual(turnableSeqs(log, nodes), [10, 17, 26])
+  // Every live human prompt: the first turn's content is removable too (its
+  // window never covers the system head).
+  assert.deepEqual(turnableSeqs(log, nodes), [4, 10, 17, 26])
   for (const seq of turnableSeqs(log, nodes)) {
     assert.doesNotThrow(() => planRange(log, nodes, { mode: 'turn', seq }), `advertised seq ${seq} must plan`)
   }
-  // The first turn holds the protected system head: no entry, and the route refuses.
-  assert.throws(
-    () => planRange(log, nodes, { mode: 'turn', seq: 4 }),
-    (error) => error instanceof PlanError && error.code === 'not-deletable',
-  )
   // An injected context row is not an ANCHOR (the entry lives on prompts) but its
   // turn's window is the same one, so addressing it plans identically.
   assert.equal(turnableSeqs(log, nodes).includes(11), false, 'a context row is not advertised')
@@ -542,5 +542,5 @@ test('turnableSeqs withholds only the prompts whose window is blocked', () => {
     { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
   const withForeign = [...fourTurnLog(), foreign]
-  assert.deepEqual(turnableSeqs(withForeign, foldSurface(withForeign).nodes), [17, 26])
+  assert.deepEqual(turnableSeqs(withForeign, foldSurface(withForeign).nodes), [4, 17, 26])
 })
