@@ -318,6 +318,32 @@ export function isOwnPlaceholder(event) {
 }
 
 /**
+ * The nodes a planned window would swallow that belong to none of its members
+ * and carry real content - a foreign node (another plugin's injected row, say)
+ * that sits between the target's own nodes. Own placeholders and other plugins'
+ * silent carriers are NOT foreign: they carry nothing the model or the
+ * transcript can see, so retiring them costs nothing and must never make the
+ * user confirm. A non-empty list does not refuse the plan; the route requires an
+ * explicit `force` before it deletes these along with the target, and the client
+ * turns that into a forced confirmation.
+ * @param shadowed - the window's surface seqs, in order.
+ * @param members - the seqs that legitimately belong to the target.
+ * @param bySeq - seq -> event lookup.
+ * @returns the foreign seqs, in window order.
+ */
+function foreignNodes(shadowed, members, bySeq) {
+  const allowed = new Set(members)
+  const out = []
+  for (const seq of shadowed) {
+    if (allowed.has(seq)) continue
+    const event = bySeq.get(seq)
+    if (isOwnPlaceholder(event) || isSilentPluginCarrier(event)) continue
+    out.push(seq)
+  }
+  return out
+}
+
+/**
  * Turn one UI target into a canonical replacement range.
  *
  * Modes:
@@ -369,6 +395,7 @@ export function planRange(events, surfaceNodes, request) {
       startSeq: targetSeq,
       endSeq: targetSeq,
       shadowed: [targetSeq],
+      foreign: [],
       turn: typeof turn === 'number' ? turn : 0,
       step: 0,
     }
@@ -400,15 +427,14 @@ export function planRange(events, surfaceNodes, request) {
     const startIdx = Math.min(...indexes)
     const endIdx = Math.max(...indexes)
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
-    if (shadowed.some((seq) => !memberSet.has(seq) && !isOwnPlaceholder(bySeq.get(seq)))) {
-      throw new PlanError('range-not-clean', 'the step window contains unrelated surface nodes')
-    }
+    const foreign = foreignNodes(shadowed, members, bySeq)
     return {
       mode,
       targetSeq,
       startSeq: shadowed[0],
       endSeq: shadowed[shadowed.length - 1],
       shadowed,
+      foreign,
       turn,
       step,
     }
@@ -445,9 +471,7 @@ export function planRange(events, surfaceNodes, request) {
     const startIdx = nodeIndex.get(members[0])
     const endIdx = nodeIndex.get(members[members.length - 1])
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
-    if (shadowed.some((seq) => !memberSet.has(seq) && !isOwnPlaceholder(bySeq.get(seq)))) {
-      throw new PlanError('range-not-clean', 'the reply window contains unrelated surface nodes')
-    }
+    const foreign = foreignNodes(shadowed, members, bySeq)
     const closing = bySeq.get(members[members.length - 1])
     const step = closing && closing.type === 'assistant/message' && typeof closing.data.step === 'number' ? closing.data.step : 0
     return {
@@ -456,6 +480,7 @@ export function planRange(events, surfaceNodes, request) {
       startSeq: members[0],
       endSeq: members[members.length - 1],
       shadowed,
+      foreign,
       turn,
       step,
     }
@@ -494,9 +519,7 @@ export function planRange(events, surfaceNodes, request) {
     // node 0 at all (a shadowed head, say), keeping the window off node 0.
     if (startIdx === 0) throw new PlanError('not-deletable', 'the window would cover the system prompt head')
     const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
-    if (shadowed.some((seq) => !members.includes(seq) && !isOwnPlaceholder(bySeq.get(seq)) && !isSilentPluginCarrier(bySeq.get(seq)))) {
-      throw new PlanError('range-not-clean', 'the turn window contains unrelated surface nodes')
-    }
+    const foreign = foreignNodes(shadowed, members, bySeq)
     const closing = bySeq.get(members[members.length - 1])
     const step = closing && closing.type === 'assistant/message' && typeof closing.data.step === 'number' ? closing.data.step : 0
     return {
@@ -505,6 +528,7 @@ export function planRange(events, surfaceNodes, request) {
       startSeq: shadowed[0],
       endSeq: shadowed[shadowed.length - 1],
       shadowed,
+      foreign,
       turn,
       step,
     }

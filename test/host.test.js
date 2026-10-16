@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
-import { apply } from '../src/index.js'
+import { apply, configureStopWait } from '../src/index.js'
 import { foldSurface, planRange } from '../src/logic.js'
 
 const SESSION_ID = 'session-11111111-1111-1111-1111-111111111111'
@@ -221,6 +221,10 @@ function turnHarness(events, options = {}) {
       if (name === 'webServer') return webServer
       if (name === 'sessions') return { get: () => session, flush: async () => true }
       if (name === 'sessionQuery') return { readSession: async () => ({ events: log }) }
+      // `options.stop` builds the session controller the route cancels through;
+      // it receives the live log so a fake stop can close the open turn the way
+      // the real loop does.
+      if (name === 'sessionController' && typeof options.stop === 'function') return options.stop(log, calls)
       return undefined
     },
   }
@@ -287,6 +291,76 @@ test('the turn route refuses a busy session, an unknown mode and the head turn',
   assert.equal(head.payload.code, 'not-deletable')
 })
 
+// --- stopping a running turn before deleting --------------------------------
+
+// A busy log whose open turn is turn 5.
+const openTurnLog = () => [...turnEvents(), { seq: 99, time: 99, type: 'turn/start', data: { turn: 5 } }]
+
+test('a running turn is stopped first, then the delete lands', async () => {
+  configureStopWait({ timeoutMs: 2000, pollMs: 10 })
+  try {
+    const cancelled = []
+    const harness = turnHarness(openTurnLog(), {
+      stop: (log) => ({
+        cancel: async (request) => {
+          cancelled.push(request.sessionId)
+          // What the loop does when the abort unwinds: the open turn closes.
+          log.push({ seq: log.length, time: 100, type: 'turn/end', data: { turn: 5 } })
+          return { accepted: true }
+        },
+      }),
+    })
+    const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
+
+    assert.equal(status, 200, JSON.stringify(payload))
+    assert.deepEqual(cancelled, [SESSION_ID], 'the stop goes out under the session id spelled as it arrived')
+    // Exactly one write from the plugin: the carrier. The stop itself appended
+    // nothing - the loop closed its turn.
+    assert.equal(harness.calls.appends.length, 1)
+    assert.equal(harness.calls.appends[0].intent.surfaceOp.op, 'replace')
+  } finally {
+    configureStopWait()
+  }
+})
+
+test('a compaction is never stopped', async () => {
+  const events = [...turnEvents(), { seq: 99, time: 99, type: 'compaction/start', data: { compactionId: 'c1' } }]
+  let cancelCalls = 0
+  const harness = turnHarness(events, {
+    stop: () => ({ cancel: async () => { cancelCalls += 1; return { accepted: true } } }),
+  })
+  const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
+  assert.equal(status, 409)
+  assert.equal(payload.code, 'busy')
+  assert.equal(cancelCalls, 0, 'a compaction bracket has no stop semantics')
+  assert.equal(harness.calls.appends.length, 0)
+})
+
+test('a stop request that is refused keeps the busy refusal', async () => {
+  const harness = turnHarness(openTurnLog(), {
+    stop: () => ({ cancel: async () => { throw new Error('session "x" not found (not attached)') } }),
+  })
+  const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
+  assert.equal(status, 409)
+  assert.equal(payload.code, 'busy')
+  assert.equal(harness.calls.appends.length, 0)
+})
+
+test('a turn that does not stop in time reports stop-timeout', async () => {
+  configureStopWait({ timeoutMs: 120, pollMs: 10 })
+  try {
+    const harness = turnHarness(openTurnLog(), {
+      stop: () => ({ cancel: async () => ({ accepted: true }) }),
+    })
+    const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
+    assert.equal(status, 409)
+    assert.equal(payload.code, 'stop-timeout')
+    assert.equal(harness.calls.appends.length, 0)
+  } finally {
+    configureStopWait()
+  }
+})
+
 test('a refused carrier write is reported as stale and nothing lands', async () => {
   const harness = turnHarness(turnEvents(), { failOn: 'user/message' })
   const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
@@ -311,4 +385,39 @@ test('the state route advertises the rows the turn route accepts', async () => {
     const accepted = await postDelete(turnHarness(turnEvents()), { sessionId: SESSION_ID, mode: 'turn', seq })
     assert.equal(accepted.status, 200, `an advertised seq must be accepted: ${seq}`)
   }
+})
+
+// --- the forced confirmation for a window with foreign content ---------------
+
+// Turn B's injected context row is replaced by a foreign node (readable content
+// from another producer), which lands inside turn B's window.
+function mixedTurnEvents() {
+  return [
+    ...turnEvents(),
+    {
+      seq: 25,
+      time: 25,
+      type: 'user/message',
+      data: { id: 'ctx-foreign', role: 'user', content: [{ type: 'text', text: 'injected by someone else' }], source: { kind: 'plugin:somebody-else' } },
+      surfaceOp: { op: 'replace', startSeq: 9, endSeq: 9 },
+      sourceEventSeqs: [9],
+    },
+  ]
+}
+
+test('a window that would swallow foreign content asks for force first', async () => {
+  const asked = await postDelete(turnHarness(mixedTurnEvents()), { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
+  assert.equal(asked.status, 409)
+  assert.equal(asked.payload.code, 'range-not-clean')
+  assert.equal(asked.payload.details.foreign, 1, 'the route reports how many unrelated nodes it would remove')
+})
+
+test('the same window goes through once the client forces it', async () => {
+  const harness = turnHarness(mixedTurnEvents())
+  const done = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2, force: true })
+  assert.equal(done.status, 200, JSON.stringify(done.payload))
+  // The one write shadows turn B's prompt, the foreign node and turn B's reply.
+  assert.equal(harness.calls.appends.length, 1)
+  assert.deepEqual(harness.calls.appends[0].intent.sourceEventSeqs, [8, 25, 10])
+  assert.deepEqual(done.payload.hidden.map((item) => item.seq), [8, 25, 10])
 })

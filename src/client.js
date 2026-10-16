@@ -110,6 +110,9 @@ window.__ModuleLoader__.load({
       'dialog.desc.step': '这一步的回复与它请求的工具结果将一并从模型上下文中移除，同一回合的其它步骤保留。',
       'dialog.desc.reply': '这条回复连同它的思考、工具调用与注入上下文将从模型上下文中移除，你的提问会保留。',
       'dialog.note': '删除只影响模型后续看到的内容，不会改写历史日志。',
+      'dialog.busyWarning': '当前回复正在生成；删除会先停止它，再继续。',
+      'dialog.extraWarning': '这段范围里还夹着别的内容；确认后会一并移除。',
+      'dialog.confirmExtra': '一并删除',
       'dialog.cancel': '取消',
       'dialog.confirm': '删除',
       'dialog.pending': '删除中…',
@@ -122,7 +125,8 @@ window.__ModuleLoader__.load({
       'error.invalid': '请求无效，请刷新后重试。',
       'error.session-not-active': '这个会话当前未激活，请先打开该会话再删除。',
       'error.session-not-found': '找不到该会话的日志。',
-      'error.busy': '该会话正在进行中，请等回复结束后再删除。',
+      'error.busy': '该会话正在进行中，且当前无法自动停止（可能正在压缩），请稍后重试。',
+      'error.stop-timeout': '已请求停止当前生成，但该回合没有及时停下；请稍后再试。',
       'error.already-deleted': '这条内容已经从上下文中删除了。',
       'error.not-deletable': '这个位置不支持删除。',
       'error.range-not-clean': '目标区间包含其它内容，已取消删除。',
@@ -146,6 +150,9 @@ window.__ModuleLoader__.load({
       'dialog.desc.step': 'This step and the tool results it requested leave the model context together; other steps in the same turn stay.',
       'dialog.desc.reply': 'This reply leaves the model context together with its reasoning, tool calls and injected context; your prompt stays.',
       'dialog.note': 'Deletion only changes what the model sees next; the append-only log is never rewritten.',
+      'dialog.busyWarning': 'A reply is still generating; deleting will stop it first.',
+      'dialog.extraWarning': 'This range also covers other content; confirming removes it as well.',
+      'dialog.confirmExtra': 'Delete all of it',
       'dialog.cancel': 'Cancel',
       'dialog.confirm': 'Delete',
       'dialog.pending': 'Deleting...',
@@ -158,7 +165,8 @@ window.__ModuleLoader__.load({
       'error.invalid': 'Invalid request; refresh and try again.',
       'error.session-not-active': 'This session is not open in DSH; open it first.',
       'error.session-not-found': 'No session log was found for this id.',
-      'error.busy': 'This session is still working; wait for the reply to finish.',
+      'error.busy': 'This session is working and cannot be stopped right now (a compaction may be running); try again in a moment.',
+      'error.stop-timeout': 'The running turn did not stop in time; try again in a moment.',
       'error.already-deleted': 'This content is already removed from the context.',
       'error.not-deletable': 'This position cannot be deleted.',
       'error.range-not-clean': 'The target window contains unrelated content; the delete was cancelled.',
@@ -198,6 +206,7 @@ window.__ModuleLoader__.load({
       '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
       '.dshdt-dialog-text{margin:0;color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:22px}',
       '.dshdt-dialog-note{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
+      '.dshdt-dialog-warn{margin:10px 0 0;color:var(--dsw-alias-state-warn-primary,#a15c00);font-size:13px;line-height:20px}',
       '.dshdt-dialog-error{margin:10px 0 0;color:var(--dsw-alias-state-error-primary,#d54941);font-size:13px;line-height:20px}',
       '.dshdt-config{display:flex;flex-direction:column;gap:8px}',
       '.dshdt-config-hint{margin:0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
@@ -283,11 +292,17 @@ window.__ModuleLoader__.load({
           markerTurns: new Set(),
           surfaceReady: false,
           surfaceThrough: -1,
+          // The host reports a running turn (or a compaction) so the dialog can
+          // say that a delete will stop the generation first.
+          busy: false,
           loaded: false,
           loadError: false,
           dialog: null,
           pending: false,
           failure: null,
+          // How many unrelated nodes the last attempt reported it would also
+          // remove (the forced-confirmation prompt).
+          foreignCount: 0,
           revision: 0,
         })
       }
@@ -357,7 +372,7 @@ window.__ModuleLoader__.load({
               if (typeof turn === 'number') markerTurns.add(turn)
             }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, hiddenVia, surface, turnSeqs, replyTurns, edits, markerTurns, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, hiddenVia, surface, turnSeqs, replyTurns, edits, markerTurns, busy: data.busy === true, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -376,11 +391,14 @@ window.__ModuleLoader__.load({
 
       close() {
         if (this.view.pending) return
-        this.publish({ dialog: null, failure: null })
+        this.publish({ dialog: null, failure: null, foreignCount: 0 })
       }
 
-      async confirm() {
-        await this.perform(this.view.dialog)
+      // `force` re-submits after the "the window also swallows N unrelated
+      // nodes" report, which is the only refusal the dialog turns into a second
+      // question instead of a dead end.
+      async confirm(options) {
+        await this.perform(this.view.dialog, { force: options && options.force === true })
       }
 
       // The entry every action uses. With "ask" on, it opens the confirmation
@@ -397,9 +415,10 @@ window.__ModuleLoader__.load({
         if (result.failure !== null) this.publish({ dialog: target, pending: false, failure: result.failure })
       }
 
-      async perform(requested) {
+      async perform(requested, options) {
         if (requested === null || this.view.pending) return { failure: null }
-        this.publish({ pending: true, failure: null })
+        const force = options !== undefined && options.force === true
+        this.publish({ pending: true, failure: null, foreignCount: 0 })
         try {
           // The live node can move while the dialog sits open: another producer
           // (dsh-edit-turn) rewrites the message in place, and the replacement
@@ -408,17 +427,18 @@ window.__ModuleLoader__.load({
           // first attempt reports content that has already left the context.
           await this.load(true)
           let target = this.resolveTarget(requested)
-          let result = await this.deleteOnce(target)
+          let result = await this.deleteOnce(target, force)
           if (!result.ok && result.code === 'already-deleted') {
             await this.load(true)
             const next = this.resolveTarget(target)
             if (next.seq !== target.seq) {
               target = next
-              result = await this.deleteOnce(next)
+              result = await this.deleteOnce(next, force)
             }
           }
           if (!result.ok) {
-            this.publish({ pending: false, failure: result.code })
+            const foreignCount = result.details && typeof result.details.foreign === 'number' ? result.details.foreign : 0
+            this.publish({ pending: false, failure: result.code, foreignCount })
             return { failure: result.code }
           }
           const data = result.data
@@ -446,15 +466,19 @@ window.__ModuleLoader__.load({
         return seq === target.seq ? target : { ...target, seq }
       }
 
-      async deleteOnce(target) {
+      async deleteOnce(target, force) {
         const res = await fetch(`${ROUTE_PREFIX}/delete`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ sessionId: this.sessionId, ...target }),
+          body: JSON.stringify({ sessionId: this.sessionId, ...target, ...(force === true ? { force: true } : {}) }),
         })
         const data = await res.json().catch(() => ({}))
         if (res.ok && data.ok) return { ok: true, data }
-        return { ok: false, code: data && data.code ? String(data.code) : 'generic' }
+        return {
+          ok: false,
+          code: data && data.code ? String(data.code) : 'generic',
+          details: data && data.details ? data.details : undefined,
+        }
       }
 
       dispose() {
@@ -1044,6 +1068,10 @@ window.__ModuleLoader__.load({
       const target = view.dialog
       const mode = target && typeof target.mode === 'string' ? target.mode : 'message'
       const failure = view.failure
+      // The one refusal that is a question rather than a dead end: the window
+      // also swallows N unrelated nodes. The button becomes an explicit
+      // "delete them too", and confirming re-submits with `force`.
+      const forced = failure === 'range-not-clean'
       return jsx(primitives.Modal, {
         open: target !== null,
         title: t(`dialog.title.${mode}`),
@@ -1063,8 +1091,14 @@ window.__ModuleLoader__.load({
               size: 'md',
               className: 'dshdt-danger',
               disabled: view.pending,
-              onClick: () => controller.confirm(),
-              children: view.pending ? t('dialog.pending') : failure ? t('dialog.retry') : t('dialog.confirm'),
+              onClick: () => controller.confirm(forced ? { force: true } : undefined),
+              children: view.pending
+                ? t('dialog.pending')
+                : forced
+                  ? t('dialog.confirmExtra')
+                  : failure
+                    ? t('dialog.retry')
+                    : t('dialog.confirm'),
             }),
           ],
         }),
@@ -1072,7 +1106,14 @@ window.__ModuleLoader__.load({
           children: [
             jsx('p', { className: 'dshdt-dialog-text', children: t(`dialog.desc.${mode}`) }),
             jsx('p', { className: 'dshdt-dialog-note', children: t('dialog.note') }),
-            failure === null
+            view.busy ? jsx('p', { className: 'dshdt-dialog-warn', children: t('dialog.busyWarning') }) : null,
+            forced
+              ? jsx('p', {
+                  className: 'dshdt-dialog-warn',
+                  children: t('dialog.extraWarning') + (view.foreignCount > 0 ? ' ×' + String(view.foreignCount) : ''),
+                })
+              : null,
+            failure === null || forced
               ? null
               : jsx('p', { className: 'dshdt-dialog-error', role: 'status', children: t(`error.${failure}`) }),
           ],

@@ -36,6 +36,7 @@ import {
   foldSurface,
   hiddenEntriesOfFold,
   isBusy,
+  openTurn,
   planRange,
   turnableSeqs,
 } from './logic.js'
@@ -44,6 +45,27 @@ export const name = PLUGIN_ID
 
 const ROUTE_PREFIX = '/dsh-delete-turn'
 const SESSION_ID_RE = /^(session-)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+// Stopping a running turn before the delete: the controller acknowledges the
+// cancel at once, but the loop still has to unwind - the provider stream is
+// cancelled, started tool calls commit their results in order, the partial
+// answer lands as `interrupted: true`, `turn/end` is appended and flushed. The
+// route therefore polls the log until the turn actually closes.
+const STOP_TIMEOUT_MS = 15000
+const STOP_POLL_MS = 250
+let stopWait = { timeoutMs: STOP_TIMEOUT_MS, pollMs: STOP_POLL_MS }
+
+/**
+ * Override the stop-and-delete wait budget. Production keeps the defaults; the
+ * suite shrinks them so the timeout branch stays cheap to test.
+ * @param options - `{ timeoutMs?, pollMs? }`.
+ */
+export function configureStopWait(options) {
+  stopWait = {
+    timeoutMs: options && typeof options.timeoutMs === 'number' ? options.timeoutMs : STOP_TIMEOUT_MS,
+    pollMs: options && typeof options.pollMs === 'number' ? options.pollMs : STOP_POLL_MS,
+  }
+}
 // `turn` is the fourth action: the widest ordinary range replace (every live
 // surface node of one turn). It dispatches through the same route and the same
 // planner as the other three; nothing here is special-cased.
@@ -97,11 +119,12 @@ function adapterDropsEmptyUserContent() {
 const SILENT_CARRIER = adapterDropsEmptyUserContent()
 
 class HttpError extends Error {
-  constructor(status, code, message) {
+  constructor(status, code, message, details) {
     super(message)
     this.name = 'HttpError'
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 
@@ -258,6 +281,48 @@ async function stateOf(ctx, sessionId) {
   }
 }
 
+// The user pressed delete while a turn was still generating: stopping that turn
+// is part of the click. The official entry is the session controller's `cancel`
+// (it resolves the live Agent and calls `agent.cancel({ kind: 'user' },
+// { keepInbox: true })`), so queued prompts survive and only the running turn is
+// aborted. `cancel` needs the session ATTACHED, which `resolveSession` above
+// already ensured. A compaction bracket has no stop semantics: it keeps the old
+// busy refusal.
+async function stopActiveTurn(ctx, sessionId, events) {
+  if (openTurn(events) === null) {
+    throw new HttpError(409, 'busy', 'the session is compacting; wait for it to finish')
+  }
+  const controller = ctx.get('sessionController')
+  if (!controller || typeof controller.cancel !== 'function') {
+    throw new HttpError(409, 'busy', 'the running turn cannot be stopped here')
+  }
+  let acknowledged = false
+  let lastError = null
+  // The controller keys agents by one spelling of the id; try both, exactly like
+  // every other lookup in this file.
+  for (const variant of idVariants(sessionId)) {
+    try {
+      await controller.cancel({ sessionId: variant })
+      acknowledged = true
+      break
+    } catch (error) {
+      lastError = error
+    }
+  }
+  if (!acknowledged) {
+    throw new HttpError(409, 'busy', `the stop request was refused: ${String((lastError && lastError.message) || lastError)}`)
+  }
+  const deadline = Date.now() + stopWait.timeoutMs
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, stopWait.pollMs))
+    const current = await readEvents(ctx, sessionId)
+    if (current && !isBusy(current)) return
+    if (Date.now() >= deadline) {
+      throw new HttpError(409, 'stop-timeout', 'the running turn did not stop in time')
+    }
+  }
+}
+
 async function deleteTarget(ctx, sessionId, body) {
   const mode = typeof body.mode === 'string' ? body.mode : ''
   if (!MODES.has(mode)) throw new HttpError(400, 'invalid', 'mode must be message, step, reply or turn')
@@ -265,9 +330,16 @@ async function deleteTarget(ctx, sessionId, body) {
   if (!session || typeof session.append !== 'function') {
     throw new HttpError(409, 'session-not-active', 'the session is not open in DSH')
   }
-  const events = await readEvents(ctx, sessionId)
+  let events = await readEvents(ctx, sessionId)
   if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
-  if (isBusy(events)) throw new HttpError(409, 'busy', 'the session is still working')
+  if (isBusy(events)) {
+    // A running turn is stopped first (the dialog says so), then the delete
+    // proceeds against the post-stop log.
+    await stopActiveTurn(ctx, sessionId, events)
+    events = await readEvents(ctx, sessionId)
+    if (!events) throw new HttpError(404, 'session-not-found', 'no session log for this id')
+    if (isBusy(events)) throw new HttpError(409, 'busy', 'the session is still working')
+  }
 
   const surfaceNodes = surfaceOf(ctx, sessionId, events)
   let plan
@@ -284,6 +356,14 @@ async function deleteTarget(ctx, sessionId, body) {
       throw new HttpError(status, error.code, error.message)
     }
     throw error
+  }
+
+  // The window may also cover nodes that belong to no part of the target (a
+  // foreign injected row, say). Deleting them is not refused - it is a decision
+  // the user must make explicitly: without `force` the route reports how many
+  // there are, and the client turns that into a second, forced confirmation.
+  if (plan.foreign.length > 0 && body.force !== true) {
+    throw new HttpError(409, 'range-not-clean', `the window would also remove ${plan.foreign.length} unrelated node(s)`, { foreign: plan.foreign.length })
   }
 
   // The live surface is the append authority; a node that vanished between the
@@ -434,7 +514,8 @@ export function apply(ctx) {
           } catch (error) {
             const status = error instanceof HttpError ? error.status : 500
             const code = error instanceof HttpError ? error.code : 'internal'
-            sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
+            const details = error instanceof HttpError && error.details !== undefined ? { details: error.details } : {}
+            sendJson(res, status, { ok: false, code, error: String((error && error.message) || error), ...details })
           }
         },
       }),
@@ -467,7 +548,8 @@ export function apply(ctx) {
           } catch (error) {
             const status = error instanceof HttpError ? error.status : 500
             const code = error instanceof HttpError ? error.code : 'internal'
-            sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
+            const details = error instanceof HttpError && error.details !== undefined ? { details: error.details } : {}
+            sendJson(res, status, { ok: false, code, error: String((error && error.message) || error), ...details })
           }
         },
       }),

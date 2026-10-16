@@ -281,9 +281,16 @@ function createEnv(options = {}) {
   const document = options.document || new StubDocument()
   const state = { loaded: null, fetchCalls: [], rafQueue: [], timers: [], observers: [], cleanups: [] }
   const payload = options.payload || DEFAULT_PAYLOAD
+  // `deleteResponses` scripts the /delete route call by call, so a test can make
+  // the first attempt report the forced-confirmation code and the retry succeed.
+  const deleteQueue = Array.isArray(options.deleteResponses) ? [...options.deleteResponses] : []
   const fetchStub = (url, init) => {
     state.fetchCalls.push({ url, init })
     if (options.fetchFails === true) return Promise.reject(new Error('offline'))
+    if (deleteQueue.length > 0 && String(url).startsWith('/dsh-delete-turn/delete')) {
+      const next = deleteQueue.shift()
+      return Promise.resolve({ ok: next.status === 200, status: next.status, json: async () => next.body })
+    }
     return Promise.resolve({ ok: true, status: 200, json: async () => payload })
   }
   class MutationObserverStub {
@@ -1042,4 +1049,54 @@ test('unticking the checkbox deletes straight away without a dialog', async () =
 
   assert.equal(controller.getSnapshot().dialog, null, 'no dialog is opened while asking is off')
   assert.equal(deleteCallCount(env), before + 1, 'the delete is issued straight away')
+})
+
+// --- the running-turn warning ------------------------------------------------
+
+test('the state payload carries a running turn into the view', async () => {
+  const running = mountOverlay({ payload: { ...DEFAULT_PAYLOAD, busy: true } })
+  running.render(running.env.snapshotFor(running.env.addRow({ key: 'k1', turn: 1 })))
+  await running.env.settle()
+  assert.equal(running.controller.getSnapshot().busy, true, 'the dialog can say a delete will stop the generation')
+
+  const idle = mountOverlay()
+  idle.render(idle.env.snapshotFor(idle.env.addRow({ key: 'k1', turn: 1 })))
+  await idle.env.settle()
+  assert.equal(idle.controller.getSnapshot().busy, false)
+})
+
+// --- the forced confirmation for foreign content -----------------------------
+
+test('a window that would swallow foreign content asks again, then forces', async () => {
+  const { env, controller, render } = mountOverlay({
+    deleteResponses: [
+      { status: 409, body: { ok: false, code: 'range-not-clean', details: { foreign: 2 } } },
+      { status: 200, body: DEFAULT_PAYLOAD },
+    ],
+  })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  click(row.querySelectorAll('.dshdt-action')[0])
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'message', seq: 3, label: 'message' })
+
+  // First confirm: the host reports the window would also remove 2 unrelated
+  // nodes. That is a question, not a dead end: the dialog stays open.
+  await controller.confirm()
+  assert.equal(controller.getSnapshot().failure, 'range-not-clean')
+  assert.equal(controller.getSnapshot().foreignCount, 2)
+  assert.notEqual(controller.getSnapshot().dialog, null)
+
+  // Second confirm carries `force`, and the delete lands.
+  await controller.confirm({ force: true })
+  assert.equal(controller.getSnapshot().dialog, null)
+  assert.equal(controller.getSnapshot().failure, null)
+
+  const deletes = env.state.fetchCalls.filter((call) => String(call.url).indexOf('/dsh-delete-turn/delete') !== -1)
+  assert.equal(deletes.length, 2)
+  assert.equal(JSON.parse(deletes[0].init.body).force, undefined, 'the first attempt never forces')
+  assert.equal(JSON.parse(deletes[1].init.body).force, true, 'the retry forces')
 })

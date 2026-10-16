@@ -164,6 +164,7 @@ test('message plan replaces exactly the addressed user message', () => {
     startSeq: 4,
     endSeq: 4,
     shadowed: [4],
+    foreign: [],
     turn: 1,
     step: 0,
   })
@@ -230,7 +231,7 @@ test('a reply window may shadow this plugin own placeholders', () => {
   assert.deepEqual(plan.shadowed, [4, 8, 6])
 })
 
-test('a foreign node inside the window still refuses the plan', () => {
+test('a foreign node inside the window is reported, not refused', () => {
   const log = [
     event(0, 'turn/start', { turn: 1 }),
     event(1, 'step/start', { turn: 1, step: 1 }),
@@ -241,8 +242,8 @@ test('a foreign node inside the window still refuses the plan', () => {
     toolResult(6, 't-1', 1, 1, 'call-1'),
     event(7, 'turn/end', { turn: 1 }),
   ]
-  // A compaction checkpoint replacing the context row: not this plugin's
-  // placeholder, so the reply window must refuse to shadow it silently.
+  // A compaction checkpoint replacing the context row: it carries readable
+  // content, so the reply window cannot retire it for free.
   const foreign = event(
     8,
     'user/message',
@@ -252,7 +253,11 @@ test('a foreign node inside the window still refuses the plan', () => {
   const withForeign = [...log, foreign]
   const nodes = foldSurface(withForeign).nodes
   assert.deepEqual(nodes, [2, 3, 4, 8, 6])
-  assert.throws(() => planRange(withForeign, nodes, { mode: 'reply', seq: 4 }), (error) => error instanceof PlanError && error.code === 'range-not-clean')
+  // The plan is not refused: it names the nodes it would swallow, and the route
+  // turns a non-empty list into the forced confirmation.
+  const plan = planRange(withForeign, nodes, { mode: 'reply', seq: 4 })
+  assert.deepEqual(plan.shadowed, [4, 8, 6])
+  assert.deepEqual(plan.foreign, [8])
 })
 
 test('deletableReplyTurns skips turns with no reply content left', () => {
@@ -426,6 +431,7 @@ test('a turn plan replaces every live surface node of the addressed turn', () =>
     startSeq: 10,
     endSeq: 12,
     shadowed: [10, 11, 12],
+    foreign: [],
     turn: 2,
     step: 1,
   })
@@ -477,7 +483,7 @@ test('a turn plan rides over this plugin own placeholder inside its window', () 
   assert.deepEqual(plan.shadowed, [10, 30, 12])
 })
 
-test('a turn plan refuses a window holding a foreign node', () => {
+test('a turn plan reports a readable foreign node and rides over a silent one', () => {
   const foreign = event(
     30,
     'user/message',
@@ -485,12 +491,12 @@ test('a turn plan refuses a window holding a foreign node', () => {
     { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
   const withForeign = [...fourTurnLog(), foreign]
-  assert.throws(
-    () => planRange(withForeign, foldSurface(withForeign).nodes, { mode: 'turn', seq: 10 }),
-    (error) => error instanceof PlanError && error.code === 'range-not-clean',
-  )
+  // Readable content: the plan keeps going, but names what it would swallow.
+  const plan = planRange(withForeign, foldSurface(withForeign).nodes, { mode: 'turn', seq: 10 })
+  assert.deepEqual(plan.shadowed, [10, 30, 12])
+  assert.deepEqual(plan.foreign, [30])
   // A SILENT carrier of another plugin (plugin source plus no readable content)
-  // carries nothing, so it rides along instead of refusing the window.
+  // carries nothing, so it rides along without ever asking the user.
   const silent = event(
     30,
     'user/message',
@@ -498,8 +504,9 @@ test('a turn plan refuses a window holding a foreign node', () => {
     { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
   const withCarrier = [...fourTurnLog(), silent]
-  const plan = planRange(withCarrier, foldSurface(withCarrier).nodes, { mode: 'turn', seq: 10 })
-  assert.deepEqual(plan.shadowed, [10, 30, 12])
+  const quiet = planRange(withCarrier, foldSurface(withCarrier).nodes, { mode: 'turn', seq: 10 })
+  assert.deepEqual(quiet.shadowed, [10, 30, 12])
+  assert.deepEqual(quiet.foreign, [])
 })
 
 test('a turn plan removes the first turn content but never the system head', () => {
@@ -534,7 +541,7 @@ test('turnableSeqs advertises exactly what the planner accepts', () => {
   assert.deepEqual(planRange(log, nodes, { mode: 'turn', seq: 11 }).shadowed, planRange(log, nodes, { mode: 'turn', seq: 10 }).shadowed)
 })
 
-test('turnableSeqs withholds only the prompts whose window is blocked', () => {
+test('turnableSeqs still advertises a turn whose window holds a foreign node', () => {
   const foreign = event(
     30,
     'user/message',
@@ -542,5 +549,9 @@ test('turnableSeqs withholds only the prompts whose window is blocked', () => {
     { surfaceOp: { op: 'replace', startSeq: 11, endSeq: 11 }, sourceEventSeqs: [11] },
   )
   const withForeign = [...fourTurnLog(), foreign]
-  assert.deepEqual(turnableSeqs(withForeign, foldSurface(withForeign).nodes), [4, 17, 26])
+  const nodes = foldSurface(withForeign).nodes
+  // The entry stays: the click leads to a forced confirmation, not a dead end,
+  // so a row is never offered only to fail.
+  assert.deepEqual(turnableSeqs(withForeign, nodes), [4, 10, 17, 26])
+  assert.deepEqual(planRange(withForeign, nodes, { mode: 'turn', seq: 10 }).foreign, [30])
 })
