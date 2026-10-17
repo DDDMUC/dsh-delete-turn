@@ -121,7 +121,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 见 [CHANGELOG.md](./CHANGELOG.md)（中文 / English）。
 
-### 验证（怎么复现上面的结论）
+### 验证
 
 ```sh
 cd dsh-delete-turn
