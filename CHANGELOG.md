@@ -50,17 +50,11 @@
 
 ## English
 
-**0.1.14** — fix: the turn-navigation marks are no longer removed by mistake.
-
-- **The bug**: the official rail numbers its marks by **position** in the rail (`跳转到第 N 轮`), not by the log's turn number. In a session whose loaded window starts later, "第 1 轮" can be turn 114; the old logic matched that number against `data-chat-turn` and hid **live** marks as if their turn were empty - observed as a ten-turn transcript left with two marks, and a long session with a blank rail.
-- **Now**: the mapping is positional (k-th mark <-> k-th loaded turn), and only applied when the rail and the loaded rows cover the same number of turns; otherwise the rail is handed back to the host untouched.
-- **Tests**: 72 -> 73 green.
-
 **0.1.14** — fix: rail marks are no longer removed by mistake, and empty slots are closed.
 
-- **The wrong hiding**: the rail numbers its marks by **position** (`跳转到第 N 轮`), not by the log's turn number; in a windowed session "第 1 轮" can be turn 114. The old logic matched that number against `data-chat-turn` and hid **live** marks - observed as a ten-turn transcript left with two marks, and a blank rail in long sessions.
+- **The wrong hiding**: `跳转到第 N 轮` carries the **real turn number**, and the old code read it as a position. In a windowed session the two disagree, so the number was matched against `data-chat-turn` and **live** marks were hidden as if their turn were empty - observed as a ten-turn transcript left with two marks, and a blank rail in long sessions.
 - **Aligned with the view**: the rail keeps one mark per turn and the number in `跳转到第 N 轮` is the real turn (the old code read it as a position, which hid live marks). A turn is "in the view" when it has at least one visible row: turns whose rows are all hidden lose their mark and the remaining marks are re-spaced, centred inside the host's own ladder; the container keeps the host's height (its virtualisation measures that height, so shrinking it unmounts the marks past the new window); a turn with no row at all is merely unloaded and keeps its mark.
-- **Tests**: 72 green.
+- **Tests**: 73 green.
 
 **0.1.13** — two behaviour changes: deleting during a running turn now stops that turn first; a window that covers someone else's content now asks for a forced confirmation instead of refusing.
 
