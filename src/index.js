@@ -118,6 +118,70 @@ function adapterDropsEmptyUserContent() {
 
 const SILENT_CARRIER = adapterDropsEmptyUserContent()
 
+/**
+ * The provider a session's last model request used, from its own log. The
+ * carrier shape depends on the ADAPTER behind that provider, so the decision has
+ * to be per session rather than once at load.
+ *
+ * @param events - the session's committed events.
+ * @returns the provider id, or null when the log does not name one.
+ */
+export function providerOf(events) {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event === null || typeof event !== 'object') continue
+    const data = event.data
+    if (data === null || typeof data !== 'object') continue
+    if (event.type === 'model/selection' && typeof data.provider === 'string' && data.provider !== '') return data.provider
+    const header = data.header
+    const config = header !== null && typeof header === 'object' ? header.config : null
+    if (event.type === 'request/header' && config !== null && typeof config === 'object' && typeof config.provider === 'string' && config.provider !== '') {
+      return config.provider
+    }
+  }
+  return null
+}
+
+/**
+ * Whether the adapter serving `provider` drops an empty user message before it
+ * reaches the wire. The DeepSeek adapter does it natively (its converter skips
+ * `role === "user" | "assistant"` with no content) and is the one adapter whose
+ * extension hooks include `prepareExtensions`; pi-ai carries the same
+ * `resolveImageAccess` but no `prepareExtensions`.
+ *
+ * @param ctx - plugin context, for the `llm` registry.
+ * @param provider - provider id from the session log.
+ * @returns true only when the adapter in play is the proven one.
+ */
+export function adapterDropsEmptyUserContentFor(ctx, provider) {
+  if (typeof provider !== 'string' || provider === '') return false
+  try {
+    const llm = ctx.get('llm')
+    const adapters = llm === null || llm === undefined ? null : llm.adapters
+    if (adapters === null || adapters === undefined || typeof adapters.get !== 'function') return false
+    const entry = adapters.get(provider)
+    const adapter = entry === null || entry === undefined ? null : entry.adapter
+    return adapter !== null && adapter !== undefined && typeof adapter.prepareExtensions === 'function'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The carrier shape for one deletion: an empty content list when this session's
+ * adapter provably drops it, one zero-width space otherwise (the safe shape for
+ * an adapter that would send `{ role: 'user', content: '' }` and get a 400).
+ *
+ * @param ctx - plugin context.
+ * @param events - the session's committed events.
+ * @returns true when the empty carrier is safe for this session.
+ */
+export function silentCarrierFor(ctx, events) {
+  if (adapterDropsEmptyUserContentFor(ctx, providerOf(events))) return true
+  // The load-time proof covers a pi-ai host with the local skip patch.
+  return SILENT_CARRIER
+}
+
 class HttpError extends Error {
   constructor(status, code, message, details) {
     super(message)
@@ -395,7 +459,7 @@ async function deleteTarget(ctx, sessionId, body) {
       {
         id: randomUUID(),
         role: 'user',
-        content: SILENT_CARRIER ? [] : [{ type: 'text', text: '\u200b' }],
+        content: silentCarrierFor(ctx, events) ? [] : [{ type: 'text', text: '\u200b' }],
         // v4 format: plugin wrappers are retired; the producer kind carries the id.
         source: { kind: `plugin:${PLUGIN_ID}` },
       },

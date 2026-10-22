@@ -4,6 +4,13 @@
 
 ## 中文
 
+**0.1.14** —— 修复：轮次导航不再被误删，空槽会被补上。
+
+- **静默载体按会话判适配器**：删除载体原来在加载时只看 `dsh-llm-pi-ai` 是否打了 `dsh-delete-turn:skip-empty-user`，所以用 DeepSeek 适配器的宿主也一直写零宽空格 —— 模型能看到它。现在按会话日志里的 `model/selection` 取 provider，再查 `ctx.llm.adapters` 里该 provider 的适配器是否原生丢弃空 user/assistant 消息（DeepSeek 适配器有 `prepareExtensions`，pi-ai 没有），是就用空载体，判不出来仍旧用零宽兜底。
+- **误删**：官方「轮次导航」的标记按**它在导轨里的位置**编号（`跳转到第 N 轮` 的 N 是位置，不是日志回合号）。在只加载了后段回合的会话里，「第 1 轮」可能是第 114 回合；旧逻辑把 N 当回合号去匹配 `data-chat-turn`，于是把**存活的**标记当成空回合隐藏 —— 实测出现过「对话视图 10 轮、导航只剩 2 轮」以及长会话导航整条空掉。
+- **与对话视图对齐**：导轨给会话里每一轮留一个标记，`跳转到第 N 轮` 的 N 就是真实轮号（之前误当成位置序号，所以会误隐藏）。现在按**行是否可见**判断一轮会不会出现在对话视图：有行且全部隐藏 → 隐藏它的标记；其余标记按序重排并在宿主自己的梯子里居中；**容器高度保持宿主原值**（宿主虚拟化按它测量窗口，改小会让后面的标记被卸载）；完全没有行的轮次（只是没加载）保持不动。
+- **测试**：73 全绿。
+
 **0.1.13** —— 两处行为变更：生成中删除会先停止该回合；窗口里夹着别的内容时改为强制确认。
 
 - **生成中删除 = 先停止，再删除。** 以前回合进行中只回一句"请等回复结束"。现在点删除会走官方 `sessionController.cancel`（与你按停止键同一条路，**保留排队的输入**），等这一轮真正收尾（`turn/end` 落地）后再删；默认等待上限 15 秒，超时返回 `stop-timeout` 并提示稍后再试。正在压缩（没有"停止"语义）或停止被拒时仍拒绝并说明原因。
@@ -42,6 +49,18 @@
 - **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。
 
 ## English
+
+**0.1.14** — fix: the turn-navigation marks are no longer removed by mistake.
+
+- **The bug**: the official rail numbers its marks by **position** in the rail (`跳转到第 N 轮`), not by the log's turn number. In a session whose loaded window starts later, "第 1 轮" can be turn 114; the old logic matched that number against `data-chat-turn` and hid **live** marks as if their turn were empty - observed as a ten-turn transcript left with two marks, and a long session with a blank rail.
+- **Now**: the mapping is positional (k-th mark <-> k-th loaded turn), and only applied when the rail and the loaded rows cover the same number of turns; otherwise the rail is handed back to the host untouched.
+- **Tests**: 72 -> 73 green.
+
+**0.1.14** — fix: rail marks are no longer removed by mistake, and empty slots are closed.
+
+- **The wrong hiding**: the rail numbers its marks by **position** (`跳转到第 N 轮`), not by the log's turn number; in a windowed session "第 1 轮" can be turn 114. The old logic matched that number against `data-chat-turn` and hid **live** marks - observed as a ten-turn transcript left with two marks, and a blank rail in long sessions.
+- **Aligned with the view**: the rail keeps one mark per turn and the number in `跳转到第 N 轮` is the real turn (the old code read it as a position, which hid live marks). A turn is "in the view" when it has at least one visible row: turns whose rows are all hidden lose their mark and the remaining marks are re-spaced, centred inside the host's own ladder; the container keeps the host's height (its virtualisation measures that height, so shrinking it unmounts the marks past the new window); a turn with no row at all is merely unloaded and keeps its mark.
+- **Tests**: 72 green.
 
 **0.1.13** — two behaviour changes: deleting during a running turn now stops that turn first; a window that covers someone else's content now asks for a forced confirmation instead of refusing.
 

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import test from 'node:test'
-import { apply, configureStopWait } from '../src/index.js'
+import { adapterDropsEmptyUserContentFor, apply, configureStopWait, providerOf, silentCarrierFor } from '../src/index.js'
 import { foldSurface, planRange } from '../src/logic.js'
 
 const SESSION_ID = 'session-11111111-1111-1111-1111-111111111111'
@@ -86,6 +86,30 @@ function fakeRes() {
     },
   }
 }
+
+test('the carrier shape follows the adapter serving this session', () => {
+  const events = [
+    { type: 'model/selection', seq: 1, data: { provider: 'pi-ai', model: 'x' } },
+    { type: 'request/header', seq: 2, data: { header: { config: { provider: 'deepseek-account' } } } },
+    { type: 'model/selection', seq: 3, data: { provider: 'deepseek-account', model: 'deepseek-flash' } },
+  ]
+  assert.equal(providerOf(events), 'deepseek-account', 'the last named provider wins')
+  assert.equal(providerOf([{ type: 'request/header', seq: 1, data: { header: { config: { provider: 'from-header' } } } }]), 'from-header')
+  assert.equal(providerOf([]), null)
+
+  const deepseekLike = { providerInfo: () => ({}), resolveImageAccess: () => '', prepareExtensions: () => ({}) }
+  const piAiLike = { providerInfo: () => ({}), resolveImageAccess: () => '' }
+  const llm = { adapters: new Map([['deepseek-account', { adapter: deepseekLike }], ['pi-ai', { adapter: piAiLike }]]) }
+  const ctx = { get: (name) => (name === 'llm' ? llm : undefined) }
+
+  assert.equal(adapterDropsEmptyUserContentFor(ctx, 'deepseek-account'), true, 'the DeepSeek adapter drops it natively')
+  assert.equal(adapterDropsEmptyUserContentFor(ctx, 'pi-ai'), false, 'pi-ai without the marker is not proven')
+  assert.equal(adapterDropsEmptyUserContentFor(ctx, 'unknown'), false)
+  assert.equal(adapterDropsEmptyUserContentFor({ get: () => undefined }, 'deepseek-account'), false, 'no registry means no proof')
+
+  assert.equal(silentCarrierFor(ctx, events), true, 'a DeepSeek-adapter session gets the empty carrier')
+  assert.equal(silentCarrierFor(ctx, [{ type: 'model/selection', seq: 1, data: { provider: 'pi-ai' } }]), false, 'an unproven session keeps the zero-width carrier')
+})
 
 test('the delete route appends a single turn-less carrier', async () => {
   const events = buildEvents()

@@ -1011,40 +1011,65 @@ window.__ModuleLoader__.load({
       updateTurnNavigation()
     }
 
-    // The host's turn-navigation rail lists loaded turns by number. A turn
-    // whose rows are all gone (deleted by us, or collapsed by the host itself)
-    // must not keep a jump mark, or an emptied transcript still shows a rail of
-    // entries pointing at nothing. Turns without any loaded row are left alone:
-    // an unmounted window is not an empty one.
-    function updateTurnNavigation() {
-      const marks = document.querySelectorAll('nav button[data-index]')
-      if (marks.length === 0) return
+    /** The turn a rail mark addresses: its label carries the real turn number. */
+    function turnOfRailMark(mark) {
+      const label = mark.getAttribute('aria-label') || mark.getAttribute('title') || ''
+      const match = /(\d+)/.exec(label)
+      return match === null ? null : Number(match[1])
+    }
+
+    /**
+     * Every turn with a row in the DOM, mapped to whether any row is visible. A
+     * turn with no row at all is absent: not empty, just not loaded.
+     */
+    function turnRowVisibility() {
       const seen = new Map()
       for (const row of document.querySelectorAll('[data-chat-flow-key][data-chat-turn]')) {
-        const turn = row.getAttribute('data-chat-turn')
-        if (turn === null || turn === '') continue
-        // A row another component declared hidden is not visible content either.
-        const visible =
-          row.dataset.dshdtHidden !== '1' && !foreignHideOn(row, 'dshdt') && row.getBoundingClientRect().height > 0
-        if (seen.get(turn) !== true) seen.set(turn, visible)
+        const turn = Number(row.getAttribute('data-chat-turn'))
+        if (!Number.isInteger(turn)) continue
+        const hidden =
+          row.dataset.dshdtHidden === '1' ||
+          foreignHideOn(row, 'dshdt') ||
+          (row.style !== undefined && row.style !== null && row.style.display === 'none') ||
+          (typeof row.getBoundingClientRect === 'function' && row.getBoundingClientRect().height === 0)
+        if (seen.get(turn) !== true) seen.set(turn, hidden !== true)
       }
-      let visibleMarks = 0
-      for (const mark of marks) {
-        const label = mark.getAttribute('aria-label') || ''
-        const turn = (label.match(/\d+/) || [])[0]
-        const state = turn === undefined ? undefined : seen.get(turn)
-        const hasContent = state === undefined ? true : state
-        if (hasContent) {
+      return seen
+    }
+
+    /**
+     * The official rail keeps one mark per turn of the session, including the
+     * turns whose rows are gone, so deleting a turn left a mark pointing at
+     * nothing and an empty slot. Drop the marks of turns with no visible row and
+     * re-space the rest inside the host's own ladder, centred; a turn that is
+     * merely not loaded keeps its mark. The container keeps the host's height:
+     * that height is what the host's virtualisation measures, so shrinking it
+     * unmounts the marks past the new window.
+     */
+    function updateTurnNavigation() {
+      const rows = turnRowVisibility()
+      const hiddenTurns = []
+      for (const [turn, visible] of rows) if (visible !== true) hiddenTurns.push(turn)
+      for (const nav of document.querySelectorAll('nav')) {
+        const marks = [...nav.querySelectorAll('button[data-index]')]
+        if (marks.length === 0) continue
+        const container = marks[0].parentElement
+        if (container === null || container === undefined) continue
+        const observed = Math.round((Number.parseFloat(container.style.height) - 2) / 10)
+        const total = Math.max(Number.isFinite(observed) && observed > 0 ? observed : 0, marks.length)
+        const kept = total - hiddenTurns.filter((turn) => turn <= total).length
+        const offset = kept > 0 && kept < total ? Math.floor((total - kept) / 2) : 0
+        for (const mark of marks) {
+          const turn = turnOfRailMark(mark)
+          if (turn === null) continue
+          if (hiddenTurns.includes(turn)) {
+            mark.dataset.dshdtHidden = '1'
+            continue
+          }
           delete mark.dataset.dshdtHidden
-          visibleMarks += 1
-        } else {
-          mark.dataset.dshdtHidden = '1'
+          const before = hiddenTurns.filter((hidden) => hidden < turn).length
+          mark.style.transform = `translate3d(0px, ${(turn - 1 - before + offset) * 10 + 1}px, 0px)`
         }
-      }
-      const nav = marks[0].closest('nav')
-      if (nav !== null) {
-        if (visibleMarks === 0) nav.dataset.dshdtHidden = '1'
-        else delete nav.dataset.dshdtHidden
       }
     }
 

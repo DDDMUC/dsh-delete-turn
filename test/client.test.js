@@ -577,29 +577,45 @@ test('the same row is still hidden when it names the shadowed seq', async () => 
   assert.equal(row.dataset.dshdtHidden, '1', 'the shadowed seq still hides')
 })
 
-test('the turn-navigation mark follows foreign attribution as well', async () => {
+test('the turn-navigation rail drops an emptied turn and closes its slot', async () => {
   const { env, render } = mountOverlay()
   const nav = env.document.createElement('nav')
-  const mark = env.document.createElement('button')
-  mark.setAttribute('data-index', '0')
-  mark.setAttribute('aria-label', 'turn 1')
-  nav.appendChild(mark)
+  const container = env.document.createElement('div')
+  container.style.height = '32px'
+  const marks = []
+  for (let turn = 1; turn <= 3; turn += 1) {
+    const mark = env.document.createElement('button')
+    mark.setAttribute('data-index', String(turn - 1))
+    mark.setAttribute('aria-label', `跳转到第 ${turn} 轮`)
+    mark.style.transform = `translate3d(0px, ${(turn - 1) * 10 + 1}px, 0px)`
+    container.appendChild(mark)
+    marks.push(mark)
+  }
+  nav.appendChild(container)
   env.document.body.appendChild(nav)
-  const row = env.addRow({ key: 'k1', turn: 1 })
-  const snapshot = env.snapshotFor(row)
+  const first = env.addRow({ key: 'k1', turn: 1 })
+  const second = env.addRow({ key: 'k2', turn: 2 })
+  const third = env.addRow({ key: 'k3', turn: 3 })
+  const snapshot = env.snapshotFor(first, second, third)
 
   render(snapshot)
   await env.settle()
   render(snapshot)
-  assert.equal(mark.hasAttribute('data-dshdt-hidden'), false, 'a visible turn keeps its mark')
+  assert.equal(marks[2].style.transform, 'translate3d(0px, 21px, 0px)', 'the host spacing is untouched')
 
-  row.setAttribute('data-dshet-hidden', '1')
+  // Every row of turn 2 is gone, so the turn no longer appears in the view.
+  second.rectHeight = 0
   render(snapshot)
-  assert.equal(mark.getAttribute('data-dshdt-hidden'), '1', 'a turn another component hid keeps no mark')
+  assert.equal(marks[1].getAttribute('data-dshdt-hidden'), '1', 'the emptied turn keeps no mark')
+  assert.equal(marks[2].style.transform, 'translate3d(0px, 11px, 0px)', 'the next live mark closes the gap')
+  assert.equal(container.style.height, '32px', "the host's own height is kept: it is what its window measures")
 
-  row.removeAttribute('data-dshet-hidden')
+  // Content comes back: the mark and the host's own spacing return.
+  second.rectHeight = 20
   render(snapshot)
-  assert.equal(mark.hasAttribute('data-dshdt-hidden'), false, 'the mark comes back with the row')
+  assert.equal(marks[1].hasAttribute('data-dshdt-hidden'), false)
+  assert.equal(marks[2].style.transform, 'translate3d(0px, 21px, 0px)')
+  assert.equal(container.style.height, '32px')
 })
 
 // --- I3 injection idempotency ----------------------------------------------
