@@ -192,6 +192,39 @@ test('the state route reports deletion bookkeeping turns', async () => {
   assert.deepEqual(payload.markerTurns, [2])
 })
 
+test('a legal id with no log is an empty state; a malformed id is refused', async () => {
+  // A session with no events: `harness([])` reads as "no log for this id".
+  const { ctx, calls } = harness([])
+  apply(ctx)
+  const route = calls.routes.get('/dsh-delete-turn/state')
+  assert.ok(route, 'the state route must be registered')
+
+  const empty = fakeRes()
+  await route.handler(fakeGet(`/dsh-delete-turn/state?sessionId=${SESSION_ID}`), empty)
+  // An EMPTY session, not a failure: the panel loads and offers nothing to
+  // delete, instead of printing "状态加载失败，稍后重试。".
+  assert.equal(empty.statusCode, 200)
+  const payload = JSON.parse(empty.body)
+  assert.equal(payload.ok, true)
+  assert.deepEqual(payload.replyTurns, [])
+  assert.deepEqual(payload.turnSeqs, [])
+  assert.equal(payload.busy, false)
+
+  // A NAMED session is a session: DSH ids are opaque (`z.string().min(1)`) and
+  // the GUI creates ids like this one.
+  const named = fakeRes()
+  await route.handler(fakeGet('/dsh-delete-turn/state?sessionId=bili-whale'), named)
+  assert.equal(named.statusCode, 200, 'a named session id is well formed')
+
+  // Malformed stays refused - nothing that could leave a path or a URL.
+  for (const bad of ['../etc/passwd', 'a/b', '.hidden', 'has space']) {
+    const malformed = fakeRes()
+    await route.handler(fakeGet('/dsh-delete-turn/state?sessionId=' + encodeURIComponent(bad)), malformed)
+    assert.equal(malformed.statusCode, 400, JSON.stringify(bad) + ' must be refused')
+    assert.equal(JSON.parse(malformed.body).code, 'invalid')
+  }
+})
+
 // --- the turn route ----------------------------------------------------------
 
 // Four closed turns: A, B (with an injected context row), C, D. Deleting turn B

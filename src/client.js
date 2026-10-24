@@ -1279,6 +1279,10 @@ window.__ModuleLoader__.load({
     }
 
     exports.apply = apply
+    // The settings card, exported so a composing bundle (dsh-as-aistudio) can
+    // render THE SAME component on its own page instead of re-implementing it:
+    // one source of truth for 删除 settings.
+    exports.ConfigCard = AskBeforeDeleteOption
     exports.inject = ['slots', 'locale']
     return module.exports
   },

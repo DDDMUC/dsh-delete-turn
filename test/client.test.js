@@ -1116,3 +1116,13 @@ test('a window that would swallow foreign content asks again, then forces', asyn
   assert.equal(JSON.parse(deletes[0].init.body).force, undefined, 'the first attempt never forces')
   assert.equal(JSON.parse(deletes[1].init.body).force, true, 'the retry forces')
 })
+
+// The settings card is exported so a composing bundle (dsh-as-aistudio) can
+// render THE SAME component on its own page instead of re-implementing it.
+test('exports the settings card for a composing bundle', () => {
+  const env = createEnv()
+  assert.equal(typeof env.module.ConfigCard, 'function')
+  assert.equal(env.module.ConfigCard.name, 'AskBeforeDeleteOption')
+  const summary = env.module.ConfigCard({ view: 'summary', t: (key) => key })
+  assert.equal(typeof summary, 'string', 'summary renders an inline one-liner')
+})
