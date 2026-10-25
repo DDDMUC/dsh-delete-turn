@@ -4,6 +4,10 @@
 
 ## 中文
 
+**0.1.15** —— 设置卡导出给组合包。
+
+- **设置卡导出**：`exports.ConfigCard`（就是 `AskBeforeDeleteOption` 那个组件）现在对外导出，于是聚合包 dsh-as-aistudio 能在自己的插件页上渲染**这同一张卡**，而不是照着重画一份。同一份「删除前询问」、同一份存储键，两个入口不会漂移；单独装本插件时那张卡仍在本插件自己的行上。
+
 **0.1.14** —— 修复：轮次导航不再被误删，空槽会被补上。
 
 - **静默载体按会话判适配器**：删除载体原来在加载时只看 `dsh-llm-pi-ai` 是否打了 `dsh-delete-turn:skip-empty-user`，所以用 DeepSeek 适配器的宿主也一直写零宽空格 —— 模型能看到它。现在按会话日志里的 `model/selection` 取 provider，再查 `ctx.llm.adapters` 里该 provider 的适配器是否原生丢弃空 user/assistant 消息（DeepSeek 适配器有 `prepareExtensions`，pi-ai 没有），是就用空载体，判不出来仍旧用零宽兜底。
@@ -49,6 +53,10 @@
 - **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。
 
 ## English
+
+**0.1.15** — the settings card is exported for composing bundles.
+
+- **Settings card export**: `exports.ConfigCard` (the `AskBeforeDeleteOption` component) is now exported, so the composing bundle dsh-as-aistudio renders **that same card** on its own plugin page instead of re-implementing it. One `ask before deleting` preference, one storage key, and the two surfaces cannot drift; installed on its own, the card stays on this plugin's own row.
 
 **0.1.14** — fix: rail marks are no longer removed by mistake, and empty slots are closed.
 
