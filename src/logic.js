@@ -536,6 +536,77 @@ export function planRange(events, surfaceNodes, request) {
 
   throw new PlanError('not-deletable', `unsupported mode ${String(mode)}`)
 }
+
+/**
+ * Plan several UI targets into the fewest disjoint surface windows.
+ *
+ * A multi-select delete is not N independent deletes. Two selected rows can
+ * share one window (a step inside a reply, a message inside its turn), and
+ * deleting the first would make the second's anchors stale before it is even
+ * attempted. Every target is therefore planned against the SAME pre-delete
+ * surface, the windows are sorted by surface position, and neighbours —
+ * overlapping or directly adjacent — are fused into one replacement. Fusing
+ * only neighbours keeps the union exact: no node is swallowed that was not
+ * already inside one of the parts, so the foreign report stays the one the
+ * single-target path would have produced.
+ *
+ * @param events - complete contiguous raw event log.
+ * @param surfaceNodes - current surface seqs in model order.
+ * @param targets - array of `{ mode, seq?, messageId?, turn? }`.
+ * @returns one plan per fused window, in surface order. `mode` is the single
+ *   part's mode when nothing was fused and `batch` otherwise; `parts` names the
+ *   targets the window covers.
+ * @throws {PlanError} when any target cannot be planned.
+ */
+export function planBatch(events, surfaceNodes, targets) {
+  if (!Array.isArray(targets) || targets.length === 0) {
+    throw new PlanError('invalid', 'targets must be a non-empty array')
+  }
+  const nodeIndex = new Map(surfaceNodes.map((seq, index) => [seq, index]))
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const plans = []
+  const seen = new Set()
+  for (const request of targets) {
+    if (!request || typeof request !== 'object') throw new PlanError('invalid', 'every target must be an object')
+    const key = [request.mode, request.seq, request.turn, request.messageId].join('|')
+    if (seen.has(key)) continue
+    seen.add(key)
+    const plan = planRange(events, surfaceNodes, request)
+    plans.push({ plan, startIdx: nodeIndex.get(plan.startSeq), endIdx: nodeIndex.get(plan.endSeq) })
+  }
+  plans.sort((a, b) => a.startIdx - b.startIdx || a.endIdx - b.endIdx)
+  const groups = []
+  for (const item of plans) {
+    const last = groups[groups.length - 1]
+    if (last !== undefined && item.startIdx <= last.endIdx + 1) {
+      last.endIdx = Math.max(last.endIdx, item.endIdx)
+      last.parts.push(item.plan)
+      continue
+    }
+    groups.push({ startIdx: item.startIdx, endIdx: item.endIdx, parts: [item.plan] })
+  }
+  return groups.map((group) => {
+    const shadowed = surfaceNodes.slice(group.startIdx, group.endIdx + 1)
+    const members = []
+    for (const plan of group.parts) {
+      for (const seq of plan.shadowed) if (!members.includes(seq)) members.push(seq)
+    }
+    const foreign = foreignNodes(shadowed, members, bySeq)
+    const first = group.parts[0]
+    return {
+      mode: group.parts.length === 1 ? first.mode : 'batch',
+      targetSeq: first.targetSeq,
+      startSeq: shadowed[0],
+      endSeq: shadowed[shadowed.length - 1],
+      shadowed,
+      foreign,
+      turn: first.turn,
+      step: first.step,
+      parts: group.parts.map((plan) => ({ mode: plan.mode, targetSeq: plan.targetSeq })),
+    }
+  })
+}
+
 // --- target resolution -------------------------------------------------------
 
 /**

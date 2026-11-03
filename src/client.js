@@ -117,6 +117,14 @@ window.__ModuleLoader__.load({
       'dialog.confirm': '删除',
       'dialog.pending': '删除中…',
       'dialog.retry': '重试',
+      'dialog.title.batch': '删除选中的内容？',
+      'dialog.desc.batch': '选中的消息、步骤与回复将从模型上下文中一并移除；没有被选中的内容保持原样。',
+      'action.tooltip.select': '多选删除',
+      'action.tooltip.selected': '已选中，再点一次取消',
+      'select.count': '已选',
+      'select.unit': '项',
+      'select.delete': '删除选中',
+      'select.cancel': '退出多选',
       'config.ask': '删除时询问',
       'config.hint.ask': '每次删除前都会弹出确认框。',
       'config.hint.auto': '删除会直接执行，不再询问。',
@@ -157,6 +165,14 @@ window.__ModuleLoader__.load({
       'dialog.confirm': 'Delete',
       'dialog.pending': 'Deleting...',
       'dialog.retry': 'Retry',
+      'dialog.title.batch': 'Delete the selected items?',
+      'dialog.desc.batch': 'The selected messages, steps and replies leave the model context together; everything not selected stays exactly as it is.',
+      'action.tooltip.select': 'Select for multi-delete',
+      'action.tooltip.selected': 'Selected - click again to unselect',
+      'select.count': 'Selected',
+      'select.unit': '',
+      'select.delete': 'Delete selected',
+      'select.cancel': 'Exit multi-select',
       'config.ask': 'Ask before deleting',
       'config.hint.ask': 'Show a confirmation dialog before every deletion.',
       'config.hint.auto': 'Delete right away without asking.',
@@ -188,6 +204,10 @@ window.__ModuleLoader__.load({
       '.dshdt-row{position:relative}',
       '.dshdt-floating{position:absolute;top:2px;right:6px;z-index:2;opacity:0;transition:opacity .12s}',
       '.dshdt-row:hover .dshdt-floating,.dshdt-floating:focus-within{opacity:1}',
+      // While rows are being picked, every toggle has to be reachable without a hover pass over each row.
+      // In the mode the hover host would only sit as an empty box over the
+      // badge, so it steps out entirely instead of fading in.
+      '.dshdt-select-on .dshdt-floating{display:none}',
       '[data-variant="think"]{position:relative}',
       '.dshdt-think-action{position:absolute;top:0;right:4px;opacity:0;transition:opacity .12s}',
       '[data-variant="think"]:hover .dshdt-think-action,.dshdt-think-action:focus-within{opacity:1}',
@@ -204,6 +224,31 @@ window.__ModuleLoader__.load({
       '.dshdt-turn:disabled{cursor:default;opacity:.4}',
       '.dshdt-turn svg{width:15px;height:15px}',
       '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
+      // In multi-select the toggle is a badge pinned to the row itself: the
+      // action strip of a message row only exists while the pointer is on it,
+      // so a toggle parked inside that strip is invisible exactly when the
+      // mode needs it.
+      '.dshdt-check{width:22px;height:22px;padding:0;display:none;align-items:center;justify-content:center;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.35));border-radius:999px;background:var(--dsw-alias-bg-elevated,#fff);color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;box-shadow:0 1px 4px rgba(0,0,0,.14);transition:background-color .12s,color .12s}',
+      '.dshdt-select-on{position:relative;opacity:1!important}',
+      '.dshdt-select-on>.dshdt-check{display:inline-flex;position:absolute;top:6px;right:6px;z-index:5}',
+      '.dshdt-check:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
+      '.dshdt-check:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
+      '.dshdt-check svg{width:13px;height:13px}',
+      '.dshdt-checked .dshdt-check{color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
+      '.dshdt-checked{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:-2px;border-radius:14px}',
+      '.dshdt-action-host[data-dshdt-badge-only="1"] .dshdt-action,.dshdt-action-host[data-dshdt-badge-only="1"] .dshdt-turn{display:none!important}',
+      '.dshdt-action-host[data-dshdt-badge-only="1"]{pointer-events:none}',
+      '.dshdt-action-host[data-dshdt-badge-only="1"]>.dshdt-check{pointer-events:auto}',
+      '.dshdt-select-on .dshdt-action,.dshdt-select-on .dshdt-turn{display:none!important}',
+      // The header entry sits among the Session utilities: the same 32px pill
+      // the official utilities use, icon-only to stay compact.
+      '.dshdt-header-select{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-width:32px;height:32px;padding:0 8px;border:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.24));border-radius:18px;background:transparent;color:var(--dsw-alias-label-primary,inherit);font-family:var(--dsw-font-family,inherit);font-size:13px;line-height:20px;cursor:pointer;transition:background-color .12s,color .12s,border-color .12s}',
+      '.dshdt-header-select:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12))}',
+      '.dshdt-header-select:disabled{color:var(--dsw-alias-label-dimmed,#9aa0aa);cursor:wait}',
+      '.dshdt-header-select svg{flex:none}',
+      '.dshdt-header-select-on{color:var(--dsw-alias-button-primary-fill,#4d6bfe);border-color:var(--dsw-alias-button-primary-fill,#4d6bfe);background:var(--dsw-alias-button-primary-ghost-fill,rgba(77,107,254,.08))}',
+      '.dshdt-selectbar{position:fixed;left:50%;bottom:104px;transform:translateX(-50%);z-index:60;display:flex;align-items:center;gap:10px;padding:8px 12px;border-radius:999px;background:var(--dsw-alias-bg-elevated,#fff);color:var(--dsw-alias-label-primary,inherit);border:1px solid var(--dsw-alias-border-secondary,rgba(127,127,127,.2));box-shadow:0 8px 28px rgba(0,0,0,.18);font-size:13px}',
+      '.dshdt-selectbar-count{min-width:56px;text-align:center;color:var(--dsw-alias-label-secondary,#5c6270)}',
       '.dshdt-dialog-text{margin:0;color:var(--dsw-alias-label-primary,inherit);font-size:14px;line-height:22px}',
       '.dshdt-dialog-note{margin:10px 0 0;color:var(--dsw-alias-label-tertiary,#8a8f98);font-size:13px;line-height:20px}',
       '.dshdt-dialog-warn{margin:10px 0 0;color:var(--dsw-alias-state-warn-primary,#a15c00);font-size:13px;line-height:20px}',
@@ -258,6 +303,16 @@ window.__ModuleLoader__.load({
       ).join('') +
       '</svg>'
 
+    // Multi-select glyph: a checkbox square with a tick.
+    const CHECK_ICON_PATHS = ['M2.7 2.7h10.6v10.6H2.7z', 'M5.3 8.15l1.95 2 3.5-4.05']
+    const CHECK_ICON_MARKUP =
+      '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+      CHECK_ICON_PATHS.map(
+        (d) =>
+          '<path d="' + d + '" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>',
+      ).join('') +
+      '</svg>'
+
     function TrashIcon() {
       return jsx('svg', {
         width: 16,
@@ -266,6 +321,21 @@ window.__ModuleLoader__.load({
         fill: 'none',
         'aria-hidden': true,
         children: ICON_PATHS.map((d, index) =>
+          jsx('path', { d, stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', strokeLinejoin: 'round' }, index),
+        ),
+      })
+    }
+
+    // The multi-select mark: a checkbox square with a tick, so the header entry
+    // reads as "select rows" rather than "delete".
+    function CheckIcon() {
+      return jsx('svg', {
+        width: 16,
+        height: 16,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': true,
+        children: CHECK_ICON_PATHS.map((d, index) =>
           jsx('path', { d, stroke: 'currentColor', strokeWidth: 1.2, strokeLinecap: 'round', strokeLinejoin: 'round' }, index),
         ),
       })
@@ -298,6 +368,11 @@ window.__ModuleLoader__.load({
           loaded: false,
           loadError: false,
           dialog: null,
+          // Multi-select: while `selecting` is on every deletable row offers a
+          // checkbox, and one request lands every checked window at once.
+          selecting: false,
+          // selectionKey -> target, so a row keeps its mark across refreshes.
+          selected: new Map(),
           pending: false,
           failure: null,
           // How many unrelated nodes the last attempt reported it would also
@@ -384,6 +459,95 @@ window.__ModuleLoader__.load({
         return pending
       }
 
+      // Entering/leaving multi-select. Leaving drops the selection, so a later
+      // entry never starts with rows the user no longer sees as marked.
+      setSelecting(on) {
+        if (this.view.pending) return
+        const selecting = on === true
+        if (selecting === this.view.selecting) return
+        this.publish({ selecting, selected: selecting ? this.view.selected : new Map(), dialog: null, failure: null, foreignCount: 0 })
+      }
+
+      toggleSelected(key, target) {
+        if (this.view.pending || typeof key !== 'string' || key === '' || target === null || target === undefined) return
+        const selected = new Map(this.view.selected)
+        if (selected.has(key)) selected.delete(key)
+        else selected.set(key, target)
+        this.publish({ selected })
+      }
+
+      // The batch entry: with "ask" on it opens the confirmation dialog, with it
+      // off it deletes straight away and only surfaces a dialog when the attempt
+      // failed (a silent failure would have nowhere to go).
+      requestBatch() {
+        const count = this.view.selected.size
+        if (count === 0 || this.view.pending) return
+        if (getPrefs().ask) {
+          this.publish({ dialog: { mode: 'batch', count }, failure: null, foreignCount: 0 })
+          return
+        }
+        void this.performBatch().then((result) => {
+          if (result.failure !== null) this.publish({ dialog: { mode: 'batch', count }, pending: false, failure: result.failure })
+        })
+      }
+
+      // One request carries every selected target. The host fuses the windows
+      // and lands them back to back, so a batch can never land half of itself.
+      async performBatch(options) {
+        if (this.view.pending) return { failure: null }
+        const force = options !== undefined && options.force === true
+        const requested = [...this.view.selected.values()]
+        if (requested.length === 0) return { failure: null }
+        this.publish({ pending: true, failure: null, foreignCount: 0 })
+        try {
+          await this.load(true)
+          // A target the fresh surface no longer holds means the log moved under
+          // the selection: refuse the whole batch instead of landing the part
+          // that still resolves.
+          const resolved = requested.map((target) => this.resolveTarget(target))
+          if (resolved.some((target) => target === null || target === undefined)) {
+            this.publish({ pending: false, failure: 'stale' })
+            return { failure: 'stale' }
+          }
+          const targets = resolved.map((target) => {
+            const out = { mode: target.mode }
+            if (typeof target.seq === 'number') out.seq = target.seq
+            if (typeof target.turn === 'number') out.turn = target.turn
+            if (typeof target.messageId === 'string') out.messageId = target.messageId
+            return out
+          })
+          const res = await fetch(`${ROUTE_PREFIX}/delete`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionId: this.sessionId, targets, ...(force ? { force: true } : {}) }),
+          })
+          const data = await res.json().catch(() => ({}))
+          if (!res.ok || !data.ok) {
+            const code = data && data.code ? String(data.code) : 'generic'
+            const foreignCount = data && data.details && typeof data.details.foreign === 'number' ? data.details.foreign : 0
+            this.publish({ pending: false, failure: code, foreignCount })
+            // `partial` means the log moved between two appends: re-read so the
+            // transcript shows what actually landed, not the pre-batch picture.
+            if (code === 'partial') await this.load(true)
+            return { failure: code }
+          }
+          const hidden = new Map(this.view.hidden)
+          for (const item of Array.isArray(data.hidden) ? data.hidden : []) {
+            if (item && typeof item.seq === 'number') hidden.set(item.seq, typeof item.mode === 'string' ? item.mode : 'message')
+          }
+          const hiddenVia = new Map(this.view.hiddenVia)
+          for (const [via, seq] of hiddenViaOf(data.hidden)) hiddenVia.set(via, seq)
+          this.animateOnce = true
+          // Leaving the mode after a landed batch keeps the next click an
+          // ordinary delete: the marks are gone, so staying would only widen it.
+          this.publish({ pending: false, selecting: false, dialog: null, hidden, hiddenVia, selected: new Map(), loaded: true, loadError: false })
+          return { failure: null }
+        } catch {
+          this.publish({ pending: false, failure: 'generic' })
+          return { failure: 'generic' }
+        }
+      }
+
       open(target) {
         this.load()
         this.publish({ dialog: target, failure: null })
@@ -398,7 +562,13 @@ window.__ModuleLoader__.load({
       // nodes" report, which is the only refusal the dialog turns into a second
       // question instead of a dead end.
       async confirm(options) {
-        await this.perform(this.view.dialog, { force: options && options.force === true })
+        const force = options !== undefined && options.force === true
+        const target = this.view.dialog
+        if (target !== null && typeof target === 'object' && target.mode === 'batch') {
+          await this.performBatch({ force })
+          return
+        }
+        await this.perform(target, { force })
       }
 
       // The entry every action uses. With "ask" on, it opens the confirmation
@@ -534,6 +704,18 @@ window.__ModuleLoader__.load({
       const data = node.data || {}
       const seq = typeof data.seq === 'number' ? data.seq : node.anchorSeq
       return typeof seq === 'number' ? { mode: 'turn', seq, label: 'turn' } : null
+    }
+
+    // Stable identity of one selectable target across snapshot refreshes: a
+    // message/step addresses a durable seq, a reply/turn a turn number. The key
+    // is what the controller keys its selection map by, so a re-read that moves
+    // a row's live seq cannot silently keep a stale mark.
+    function selectionKey(target) {
+      if (!target || typeof target !== 'object') return ''
+      if (typeof target.seq === 'number') return target.mode + ':' + String(target.seq)
+      if (typeof target.turn === 'number') return target.mode + ':t' + String(target.turn)
+      if (typeof target.messageId === 'string') return target.mode + ':m' + target.messageId
+      return ''
     }
 
     function seqsFor(node) {
@@ -693,7 +875,7 @@ window.__ModuleLoader__.load({
       host.className = kind === 'think' ? HOST_CLASS + ' ' + THINK_CLASS : HOST_CLASS
       host.setAttribute(HOST_MARK, '1')
       if (kind === 'think') host.setAttribute(THINK_MARK, '1')
-      let button = host.querySelector('button')
+      let button = host.querySelector('button.dshdt-action')
       if (button === null) {
         button = document.createElement('button')
         button.type = 'button'
@@ -717,7 +899,20 @@ window.__ModuleLoader__.load({
           host.appendChild(turn)
         }
       }
-      return { host, button, turn }
+      // The multi-select checkbox rides in the same host (same namespace, same
+      // adoption rule); it is only ever VISIBLE while the mode is on.
+      let check = null
+      if (kind !== 'think') {
+        check = host.querySelector('.dshdt-check')
+        if (check === null) {
+          check = document.createElement('button')
+          check.type = 'button'
+          check.className = 'dshdt-check dshdt-row-action'
+          check.innerHTML = CHECK_ICON_MARKUP
+          host.appendChild(check)
+        }
+      }
+      return { host, button, turn, check }
     }
 
     // Drop every node this plugin injected. Matched through this plugin's own
@@ -730,6 +925,8 @@ window.__ModuleLoader__.load({
     function sweepInjectedNodes() {
       for (const host of document.querySelectorAll('[' + HOST_MARK + '="1"]')) host.remove()
       for (const host of document.querySelectorAll('.' + HOST_CLASS)) host.remove()
+      // A toggle parked on a row is not inside any host, so it is swept by name.
+      for (const node of document.querySelectorAll('.dshdt-check')) node.remove()
       // These entries now point at detached nodes; the next injection re-adopts
       // from the DOM instead of trusting them.
       rowActions = new WeakMap()
@@ -803,11 +1000,23 @@ window.__ModuleLoader__.load({
       const entry = rowActions.get(row)
       if (!entry) return
       entry.host.remove()
+      // The toggle may be on the row rather than in the host while the mode is
+      // on, so the row is swept of direct children that belong to the host.
+      for (const node of row.querySelectorAll('.dshdt-check')) {
+        if (node.parentElement === row) node.remove()
+      }
       rowActions.delete(row)
+      delete row.dataset.dshdtSelect
+      row.classList.remove('dshdt-select-on', 'dshdt-checked')
     }
 
-    function injectRowAction(row, node, target, turnTarget, controller, t) {
-      const label = t(`action.tooltip.${target.label}`)
+    function injectRowAction(row, node, target, turnTarget, view, controller, t, pickTarget) {
+      // A row can carry the multi-select badge without carrying a hover action:
+      // a turn's answer text has no row-level scope of its own, only a reply
+      // scope, and that scope already lives in the reply action strip.
+      const badgeOnly = target === null
+      const pick = pickTarget === undefined || pickTarget === null ? target : pickTarget
+      const label = badgeOnly ? '' : t(`action.tooltip.${target.label}`)
       let entry = rowActions.get(row)
       if (!entry) {
         // Never a second host on a row that already carries one: an earlier
@@ -815,20 +1024,24 @@ window.__ModuleLoader__.load({
         entry = adoptHost(findOwnedHost(row, false), 'row')
         rowActions.set(row, entry)
       }
-      const { host, button, turn } = entry
+      const { host, button, turn, check } = entry
+      if (badgeOnly) host.dataset.dshdtBadgeOnly = '1'
+      else delete host.dataset.dshdtBadgeOnly
       if (button.getAttribute('aria-label') !== label) {
         button.setAttribute('aria-label', label)
         button.setAttribute('title', label)
       }
-      button.onclick = (event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        controller.trigger(target)
-      }
+      button.onclick = badgeOnly
+        ? null
+        : (event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            controller.trigger(target)
+          }
       // The second action is wired only where a turn target exists (and stays
       // hidden by the row attribute otherwise), so a row can never offer an
       // operation the host would refuse for the wrong reason.
-      if (turn !== null && turn !== undefined) {
+      if (!badgeOnly && turn !== null && turn !== undefined) {
         const turnLabel = t('action.tooltip.turn')
         if (turn.getAttribute('aria-label') !== turnLabel) {
           turn.setAttribute('aria-label', turnLabel)
@@ -842,6 +1055,39 @@ window.__ModuleLoader__.load({
                 event.stopPropagation()
                 controller.trigger(turnTarget)
               }
+      }
+      // Multi-select: the same host carries the toggle. Outside selection mode
+      // it enters the mode AND marks this row, so one click both opens the bar
+      // and shows what the next click would do.
+      if (check !== null && check !== undefined) {
+        const key = selectionKey(pick)
+        const selecting = view.selecting === true
+        const selected = selecting && key !== '' && view.selected.has(key)
+        if (selecting) {
+          row.dataset.dshdtSelect = '1'
+          row.classList.add('dshdt-select-on')
+          // Physically move the node onto the row for the duration of the
+          // mode; the same element and handler go back to the host after.
+          if (check.parentElement !== row) row.appendChild(check)
+        } else {
+          delete row.dataset.dshdtSelect
+          row.classList.remove('dshdt-select-on')
+          if (check.parentElement !== host) host.appendChild(check)
+        }
+        if (selected) row.classList.add('dshdt-checked')
+        else row.classList.remove('dshdt-checked')
+        const checkLabel = selected ? t('action.tooltip.selected') : t('action.tooltip.select')
+        if (check.getAttribute('aria-label') !== checkLabel) {
+          check.setAttribute('aria-label', checkLabel)
+          check.setAttribute('title', checkLabel)
+        }
+        check.setAttribute('aria-pressed', selected ? 'true' : 'false')
+        check.onclick = (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          if (!controller.view.selecting) controller.setSelecting(true)
+          controller.toggleSelected(key, pick)
+        }
       }
       const anchor = node.kind === 'user' || node.kind === 'steering' ? row.querySelector('[class*="_actions"]') : null
       if (anchor) {
@@ -980,13 +1226,22 @@ window.__ModuleLoader__.load({
         const hidden = orphaned || isRowHidden(view.hidden, view.hiddenVia, seqs)
         setRowHidden(row, hidden, animate)
         const target = hidden ? null : liveTarget(targetFor(node), view.edits)
-        const covered = target !== null || slotCoversRow(node)
+        // A row with no scope of its own (the answer text of a turn) still earns
+        // the badge when its turn's reply is deletable: ticking it deletes that
+        // answer and keeps the prompt, which is the only scope the row owns.
+        const turnNumber = turn === null || turn === '' ? null : Number(turn)
+        const replyPick =
+          !hidden && turnNumber !== null && Number.isFinite(turnNumber) && view.replyTurns.has(turnNumber)
+            ? { mode: 'reply', turn: turnNumber, label: 'reply' }
+            : null
+        const covered = target !== null || slotCoversRow(node) || replyPick !== null
         const deletable = !hidden && covered && rowDeletable(node, seqs, view)
         // The turn-delete entry rides on the same gates as the delete entry: a
         // row whose content already left the context offers neither.
         const turnTarget =
           deletable && turnTargetFor(node) !== null && view.turnSeqs.has(target.seq) ? liveTarget(turnTargetFor(node), view.edits) : null
-        if (deletable && target !== null) injectRowAction(row, node, target, turnTarget, controller, t)
+        const pickTarget = target !== null ? target : deletable ? replyPick : null
+        if (deletable && pickTarget !== null) injectRowAction(row, node, target, turnTarget, view, controller, t, pickTarget)
         else removeRowAction(row)
         if (deletable && target !== null && turnTarget !== null) row.dataset.dshdtTurn = '1'
         else delete row.dataset.dshdtTurn
@@ -1086,6 +1341,63 @@ window.__ModuleLoader__.load({
         disabled: view.pending,
         onClick: () => controller.trigger({ mode: 'reply', messageId }),
         children: jsx(TrashIcon, {}),
+      })
+    }
+
+    // The multi-select bar. Fixed placement keeps it out of the slot's layout:
+    // `conversation.input.overlay` is drawn over the composer, so an in-flow bar
+    // would push the input area around (and re-measure it) on every toggle.
+    // Multi-select is a MODE: entering it has to be possible without hovering a
+    // row first, so the entry lives in the Session header - always visible,
+    // next to the other Session utilities. The per-row toggles only appear once
+    // the mode is on (their rows carry `data-dshdt-select` then).
+    function SelectToggle({ useDeletion, controller, t }) {
+      const view = useDeletion((state) => state)
+      const selecting = view.selecting === true
+      const label = selecting ? t('select.cancel') : t('action.tooltip.select')
+      return jsx('button', {
+        type: 'button',
+        className: selecting ? 'dshdt-header-select dshdt-header-select-on' : 'dshdt-header-select',
+        'aria-label': label,
+        'aria-pressed': selecting ? 'true' : 'false',
+        title: label,
+        disabled: view.pending,
+        onClick: (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          controller.setSelecting(!selecting)
+        },
+        children: jsx(CheckIcon, {}),
+      })
+    }
+
+    function SelectionBar({ view, controller, t }) {
+      if (view.selecting !== true) return null
+      const count = view.selected.size
+      return jsxs('div', {
+        className: 'dshdt-selectbar',
+        role: 'toolbar',
+        children: [
+          jsx('span', {
+            className: 'dshdt-selectbar-count',
+            children: `${t('select.count')} ${count}${t('select.unit')}`,
+          }),
+          jsx(primitives.Button, {
+            variant: 'ghost',
+            size: 'md',
+            disabled: view.pending,
+            onClick: () => controller.setSelecting(false),
+            children: t('select.cancel'),
+          }),
+          jsx(primitives.Button, {
+            variant: 'primary',
+            size: 'md',
+            className: 'dshdt-danger',
+            disabled: view.pending || count === 0,
+            onClick: () => controller.requestBatch(),
+            children: view.pending ? t('dialog.pending') : t('select.delete'),
+          }),
+        ],
       })
     }
 
@@ -1198,7 +1510,11 @@ window.__ModuleLoader__.load({
       return jsxs(Fragment, {
         // The slot root carries this plugin's namespace as well (I3). It is
         // React's node: the dispose sweep must not touch it.
-        children: [jsx('span', { hidden: true, 'data-dshdt-overlay': '1' }), jsx(ConfirmDialog, { view, controller, t })],
+        children: [
+          jsx('span', { hidden: true, 'data-dshdt-overlay': '1' }),
+          jsx(SelectionBar, { view, controller, t }),
+          jsx(ConfirmDialog, { view, controller, t }),
+        ],
       })
     }
 
@@ -1246,6 +1562,20 @@ window.__ModuleLoader__.load({
             inject: (sessionId) => ({ hooks: { deletion: controllerFor(sessionId) }, controller: controllerFor(sessionId) }),
           },
           AssistantAction,
+        ),
+      )
+
+      // The always-visible door into multi-select, beside the Session utilities.
+      ctx.slots.inject('conversation.session.header.utilities', () =>
+        ctx.slots.register(
+          {
+            name: 'conversation.session.header.utilities',
+            id: 'delete-turn',
+            order: 10,
+            locale: NS,
+            inject: (sessionId) => ({ hooks: { deletion: controllerFor(sessionId) }, controller: controllerFor(sessionId) }),
+          },
+          SelectToggle,
         ),
       )
 

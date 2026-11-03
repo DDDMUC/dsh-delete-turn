@@ -134,7 +134,7 @@ test('the delete route appends a single turn-less carrier', async () => {
   const [carrier] = calls.appends
   assert.equal(carrier.type, 'user/message')
   assert.deepEqual(carrier.data.content, [{ type: 'text', text: '\u200b' }])
-  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn' })
+  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn', op: 'delete', turn: 1 })
   assert.deepEqual(carrier.intent.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 3 })
   assert.deepEqual(carrier.intent.sourceEventSeqs, [3])
   assert.equal(payload.replacementSeq, 5)
@@ -154,6 +154,95 @@ test('an own carrier on the surface can be deleted again with mode message', () 
   assert.deepEqual(nodes, [2, 5])
   const plan = planRange(events, nodes, { mode: 'message', seq: 5 })
   assert.deepEqual(plan.shadowed, [5])
+})
+
+// A three-turn transcript, so a batch can hold two windows that are NOT
+// neighbours (turn 2 sits between them) as well as two that are.
+function buildThreeTurns() {
+  const events = []
+  const push = (type, data, extra = {}) => events.push({ seq: events.length, time: events.length + 1, type, data, ...extra })
+  const prompt = (id, text) => ({ id, role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+  for (const turn of [1, 2, 3]) {
+    push('turn/start', { turn })
+    push('step/start', { turn, step: 1 })
+    if (turn === 1) {
+      push(
+        'system/message',
+        {
+          turn,
+          step: 1,
+          message: { id: 'sys-1', role: 'system', content: [{ type: 'text', text: 'sys' }], source: { kind: 'plugin', plugin: 'test' } },
+        },
+        { surfaceOp: 'append' },
+      )
+    }
+    push('user/message', prompt('u-' + turn, 'turn ' + turn), { surfaceOp: 'append' })
+    push('turn/end', { turn })
+  }
+  return events
+}
+
+test('a batch lands one carrier per window, all of them or none', async () => {
+  const events = buildThreeTurns()
+  const { ctx, calls } = harness(events)
+  apply(ctx)
+  const route = calls.routes.get('/dsh-delete-turn/delete')
+  assert.ok(route, 'the delete route must be registered')
+
+  const res = fakeRes()
+  await route.handler(fakeReq({ sessionId: SESSION_ID, targets: [{ mode: 'turn', seq: 3 }, { mode: 'turn', seq: 11 }] }), res)
+  const payload = JSON.parse(res.body)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(payload.ok, true)
+  assert.equal(calls.appends.length, 2, 'turn 1 and turn 3 are not neighbours')
+  assert.deepEqual(
+    calls.appends.map((entry) => entry.intent.surfaceOp),
+    [
+      { op: 'replace', startSeq: 3, endSeq: 3 },
+      { op: 'replace', startSeq: 11, endSeq: 11 },
+    ],
+    'windows land in surface order',
+  )
+  assert.equal(payload.replacements.length, 2)
+  assert.equal(payload.replacementSeq, payload.replacements[1])
+  assert.deepEqual(payload.hidden, [
+    { seq: 3, mode: 'turn' },
+    { seq: 11, mode: 'turn' },
+  ])
+})
+
+test('a batch of neighbouring turns is ONE range replace', async () => {
+  const events = buildThreeTurns()
+  const { ctx, calls } = harness(events)
+  apply(ctx)
+  const route = calls.routes.get('/dsh-delete-turn/delete')
+
+  const res = fakeRes()
+  await route.handler(fakeReq({ sessionId: SESSION_ID, targets: [{ mode: 'turn', seq: 3 }, { mode: 'turn', seq: 7 }] }), res)
+  const payload = JSON.parse(res.body)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(calls.appends.length, 1, 'adjacent windows fuse into one replacement')
+  assert.deepEqual(calls.appends[0].intent.surfaceOp, { op: 'replace', startSeq: 3, endSeq: 7 })
+  assert.deepEqual(calls.appends[0].intent.sourceEventSeqs, [3, 7])
+  assert.deepEqual(payload.hidden, [
+    { seq: 3, mode: 'batch' },
+    { seq: 7, mode: 'batch' },
+  ])
+  assert.equal(payload.replacements, undefined, 'a single window keeps the one-target shape')
+})
+
+test('an empty batch is refused before anything is appended', async () => {
+  const events = buildThreeTurns()
+  const { ctx, calls } = harness(events)
+  apply(ctx)
+  const route = calls.routes.get('/dsh-delete-turn/delete')
+  const res = fakeRes()
+  await route.handler(fakeReq({ sessionId: SESSION_ID, targets: [] }), res)
+  assert.equal(res.statusCode, 400)
+  assert.equal(JSON.parse(res.body).code, 'invalid')
+  assert.equal(calls.appends.length, 0)
 })
 
 function fakeGet(url) {
@@ -317,7 +406,7 @@ test('the turn route lands one carrier and leaves the later turns in place', asy
   const [carrier] = harness.calls.appends
   assert.equal(carrier.type, 'user/message')
   assert.equal(carrier.data.turn, undefined, 'the carrier never opens a turn')
-  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn' })
+  assert.deepEqual(carrier.data.source, { kind: 'plugin:dsh-delete-turn', op: 'delete', turn: 2, deletedTurn: 2, deleteIndex: 1 })
   assert.deepEqual(carrier.intent.surfaceOp, { op: 'replace', startSeq: 8, endSeq: 10 })
   assert.deepEqual(carrier.intent.sourceEventSeqs, [8, 9, 10])
   assert.equal(payload.replacementSeq, 25)

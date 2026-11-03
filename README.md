@@ -25,11 +25,13 @@ DSH 的会话日志是 append-only 的：说错话、发错提示词、模型答
 - 助手回复（官方操作条）→ 删这条回复连同它的思考、工具调用与注入上下文（你的提问保留）；
 - 用户消息行 → 还有第二个入口：**删掉这一整轮（含提问、注入上下文与全部回复）**；
 - 注入上下文行、失败回合行 → 同样有删除入口。
+- 任意多行 → **勾选后一次删掉**（多选删除；入口在 Session 标题栏右上角，相邻的窗口会合成一次范围替换，一次请求要么全落、要么全不落）。
 
 ### 特性
 
 - **模型上下文级删除** —— 追加一条官方 `surfaceOp: { op: 'replace', startSeq, endSeq }` 替换事件，被遮蔽的内容不再进入 `deriveMessages()`；与宿主 `/compact` 同一套官方契约
 - **整轮删除（新）** —— 删掉一轮（**含你的提问**、注入上下文、全部回复与工具结果）：一次普通的范围替换落地，后面的轮次原地保留、连编号都不变——不重放、不重编号、日志只多一条事件
+- **多选删除（新）** —— 入口常驻在 **Session 标题栏右上角**（电源按钮附近）：点它进入多选，行内随之出现勾选框，勾几行、点底部浮条的「删除选中」，一次请求带走全部；相邻的窗口在宿主侧**融合成一条**替换事件，非相邻的按 surface 顺序依次落地；任何一次拒绝都不会只删掉一半。**助手最终回答段同样能勾**——它没有行级垃圾桶（那个范围属于回复动作条），勾它删的是这一条回复、保留你的提问。
 - **转录级隐藏** —— 客户端按 `data-chat-flow-*` 锚点与官方 `useChat` 快照定位行，删除后折叠退场；刷新、重启 DSH、换标签页后依旧隐藏
 - **日志即台账** —— 隐藏依据直接从日志里的替换事件重建（替换事件的消息 source 标记为本插件），不依赖 localStorage、不需要预检，也不会和其它插件（如压缩）的替换混淆
 - **原生视觉** —— 复用官方 primitives 的 Modal / Button 与主题 token，明暗主题自动适配；图标与全部文案为原创
@@ -69,6 +71,7 @@ dsh --profile web --dump-config   # 应出现 "# == dsh-delete-turn" 段落
 1. 悬停任意消息行，点击行尾的垃圾桶按钮；助手回复的按钮在官方操作条（复制 / 分叉旁边）。
 2. 确认弹窗会说明这次删除的影响范围，点「删除」。用户消息行上还有一个「删除这一轮」入口：它删的是**整轮**（含你的提问、注入上下文与全部回复），后面的轮次原地保留、直接接上。
 3. 目标行折叠退场；模型上下文在**下一轮请求**重建时不再包含它。
+4. 想一次删多条：点 **Session 标题栏右上角**（电源按钮附近）的勾选按钮进入多选——行内随即出现勾选框，点任意行勾选/取消，底部浮条报出已选条数；点「删除选中」确认后一次性落地，点「退出多选」或再点标题栏那个按钮退出。助手最终回答段也能勾，勾它删的是这一条回复，不删你的提问。
 
 ### 工作原理
 
@@ -95,6 +98,12 @@ UI（官方槽按钮 / DOM 增强按钮）
   （提问 + 注入上下文 + 每个 step 的 assistant/message 与 tool/result）
   落一条 turn-less 载体，后面的轮次原地保留、编号不变
   —— 不重放、不重编号、不碰代理循环，日志只多一条事件
+
+多选删除（POST 带 targets: [{ mode, seq? / turn? }, ...]）：
+  planBatch：每个目标各自 planRange，全部对着**同一份删除前 surface** 算
+  按 surface 顺序排序；重叠或相邻的窗口合并成一条 replace（一个扇区）
+  写入前一次性校验全部窗口（foreign / stale），任何一条不干净就整体拒绝
+  → 每个扇区一条载体，按顺序落地；要么全落，要么一条都不落
 ```
 
 设计要点：
@@ -103,6 +112,9 @@ UI（官方槽按钮 / DOM 增强按钮）
 - **为什么不读 React fiber / CSS 哈希类名**：行定位只用官方 `data-chat-flow-*` 锚点与官方 `useChat` 标准 hook，宿主 UI 重构不会静默失效。
 - **为什么刷新后仍然隐藏**：隐藏台账不是浏览器本地状态，而是日志里替换事件的可重放推导；宿主 `/state` 路由在每次打开会话时重建它。
 - **整轮删除不重放、不重编号**：只遮蔽这一轮自己的表面节点，后面的轮次一条不动——日志的轮号、后续轮的内容、它们对其他事件的引用都不受影响，也不需要任何跨轮操作。
+- **多选的入口在标题栏，不在行里**：多选是一个模式，而行内按钮只在悬停时存在——把入口藏在一次悬停之后，就等于藏起来（首版就是这么做的，用户找不到）。因此常驻入口是 Session 标题栏的 `conversation.session.header.utilities` 条目，行内勾选框只在模式打开后出现。
+- **没有行级入口的行也能勾**：助手最终回答段的范围是「整轮回复」，这份入口在回复动作条上，所以行上不再放垃圾桶（否则同一个范围出现两个按钮）；多选态下它仍拿到一个勾选框，指向 `reply` 目标——只有该 turn 出现在 `view.replyTurns` 里才给，勾它删这条回复、保留提问。
+- **多选是一次请求，也是一次全有或全无**：窗口在宿主侧算，客户端只发目标；相邻窗口融合后一次落地更少的事件（两轮相邻时是 1 条而不是 2 条），且所有窗口共用一次校验，正常路径下不会出现「删了一半」（只有在两次 append 之间日志被别处改动、第二个窗口被拒的极端情况下，路由才会明确返回 `partial`，界面随即重读状态显示真实结果）。
 - **广告即承诺**：`/state` 报出 `turnSeqs`（现在哪些行可以整轮删除），它由**路由规划用的同一个函数**算出（`turnableSeqs` 对每个候选调用 `planRange`），所以界面上的入口不会变成一次注定被拒的点击。
 
 ### 已知限制
@@ -110,6 +122,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 - append-only 语义下没有「反删除」：被遮蔽的内容无法真正恢复，删除不可撤销（原始日志仍在，可用官方工具自行重建会话）。
 - 回合进行中删除会**先停止当前生成**：走官方 `sessionController.cancel`（等价于你按停止键，且保留排队的输入），等这一轮真正收尾（`turn/end` 落地）后再删；停止超时（默认 15 秒）、停止被拒、或正在压缩（压缩没有"停止"语义）时仍会拒绝并给出原因。
 - 系统提示词头（surface 节点 0）不可删除。
+- 多选删除是**一次请求**：所有窗口在写入前一起校验（foreign / stale），所以不会出现「删了一半」；但它删掉的东西同样不可撤销。
 - 助手操作条的删除范围是**整条回复**；要只删某一步，请用思考卡 / 工具卡上的按钮。
 - 过程行（「已思考」「用时 N 秒」）不单独提供删除入口：它的范围同样是整条回复，与操作条重复，因此只保留操作条那一个。
 - 已经被官方压缩（`/compact`）移出模型上下文的内容不再显示删除入口：它已经不在上下文里，转录用意保留；入口只在内容仍可删时才出现。
@@ -131,7 +144,7 @@ UI（官方槽按钮 / DOM 增强按钮）
 
 ```sh
 cd dsh-delete-turn
-npm test                                    # 62 例：纯逻辑 + 宿主路由 + 真实校验器契约 + 客户端 DOM
+npm test                                    # 86 例：纯逻辑 + 宿主路由 + 真实校验器契约 + 客户端 DOM
 node tools/verify-real-session.mjs <session.v4.jsonl.zstd> [--turn N]
 ```
 
@@ -169,12 +182,14 @@ This plugin puts deletion back on the message itself:
 - reasoning card / tool card → remove that step (the step's `assistant/message` and the `tool/result` it requested leave together, so tool pairs never dangle);
 - assistant reply (official action strip) → remove the whole reply attempt with its reasoning, tool calls and injected context (your prompt stays);
 - user message → a second entry: **delete this whole turn (prompt, injected context and every reply step included)**;
-- injected-context rows and failed-turn rows get an entry too.
+- injected-context rows and failed-turn rows get an entry too;
+- any number of rows → **tick them and delete them together** (multi-select; the entry sits in the Session header's top-right corner, neighbouring windows fuse into one range replace, and one request lands all of them or none). A turn's answer text is selectable too: it carries no row-level trash (that scope belongs to the reply action strip), so ticking it deletes just that reply and keeps your prompt.
 
 ### Features
 
 - **Context-level delete** — appends the official `surfaceOp: { op: 'replace', startSeq, endSeq }` intent; shadowed content no longer reaches `deriveMessages()`. Same contract as `/compact`.
 - **Turn delete (new)** — remove one whole turn (**your prompt included**, plus its injected context and every reply step and tool result) as one ordinary range replace: the later turns stay exactly where they are, under their own numbers — no replay, no renumbering, one extra event.
+- **Multi-select (new)** — the entry lives in the **Session header's top-right corner** (next to the power control): it turns the mode on, every row then shows a tick box, and one request takes them all from the bottom bar's “Delete selected”. Neighbouring windows **fuse into one** range replace on the host, distant ones land in surface order, and a refusal never leaves half of the batch behind
 - **Transcript-level hide** — rows are located through official `data-chat-flow-*` anchors and the official `useChat` snapshot, then collapse out. The hide survives a reload, a DSH restart and other tabs.
 - **The log is the ledger** — hidden seqs are re-derived from the replacement events themselves (their message source is marked with this plugin), so there is no localStorage sidecar, no preflight, and no confusion with compaction replacements.
 - **Native look** — official primitives (Modal / Button) and theme tokens; icon and all copy are original.
@@ -212,8 +227,9 @@ dsh --profile web --dump-config   # expect a "# == dsh-delete-turn" section
 ### Usage
 
 1. Hover a message row and click the trash action at its end; the assistant action sits in the official action strip next to copy/branch.
-2. The dialog states the exact scope; click Delete. A user row also carries “Delete this turn and close the gap”, which removes the whole turn (prompt included) and replays the turns after it back into place.
+2. The dialog states the exact scope; click Delete. A user row also carries “Delete this whole turn”, which removes the whole turn (prompt included) as one range replace: the later turns keep their place and their numbers.
 3. The row collapses away; the model context stops containing it when the next request is rebuilt.
+4. To remove several things at once: click the tick control in the **Session header's top-right corner** to enter multi-select — every row then shows a tick box; tick or untick rows, watch the bottom bar's count, then click “Delete selected”. “Leave multi-select”, or that same header control, ends the mode and drops the marks. A turn's answer text can be ticked as well — that deletes the reply and keeps your prompt.
 
 ### How it works
 
@@ -240,6 +256,12 @@ Turn delete (mode: 'turn'):
   (prompt + injected context + every step's assistant/message and tool/result)
   landing one turn-less carrier; later turns keep their place and their numbers
   - no replay, no renumbering, no loop state touched, one extra event
+
+Multi-select (POST carries targets: [{ mode, seq? / turn? }, ...]):
+  planBatch: each target planned by planRange against the SAME pre-delete surface
+  sorted by surface order; overlapping or adjacent windows fuse into one replace
+  every window validated together (foreign / stale) before the first append
+  → one carrier per window, landed in order; all of them or none
 ```
 
 Design notes:
@@ -248,6 +270,9 @@ Design notes:
 - **Why no React fiber or CSS-module hashing**: rows are addressed through official `data-chat-flow-*` anchors and the official `useChat` standard hook, so a host UI refactor cannot silently detach the actions.
 - **Why a reload stays hidden**: the ledger is not browser state; it is a replay of the replacement events in the log, rebuilt by the host `/state` route.
 - **A turn delete neither replays nor renumbers**: it shadows this turn's own surface nodes and nothing else, so the log's numbering, every later turn's content and their references to other events are untouched — and no cross-turn operation is needed.
+- **The multi-select door is in the header, not in a row**: multi-select is a mode, and a row action only exists while its row is hovered — hiding the door behind a hover hides it outright (the first cut did exactly that and the user could not find it). The always-visible entry is a `conversation.session.header.utilities` item; the per-row tick boxes only exist once the mode is on.
+- **A row without a scope of its own can still be ticked**: a turn's answer text belongs to the reply scope, whose entry lives in the reply action strip, so no trash is drawn on the row (two buttons for one scope would be a lie); the mode still gives it a tick box aimed at `reply`, offered only when the turn is in `view.replyTurns`, and ticking it deletes that reply while the prompt survives.
+- **A batch is one request and one all-or-nothing step**: the windows are planned host-side, the client only ships targets; fusing neighbours means fewer events (two adjacent turns cost 1 instead of 2), and one shared validation pass makes a half-landed batch the exceptional case: only when the log moves between two appends does the route answer `partial`, and the UI then re-reads the state to show what actually landed.
 - **Advertised = accepted**: `/state` publishes `turnSeqs` (the rows that can be turn-deleted right now), computed by the SAME function the route plans with (`turnableSeqs` tries `planRange` on each candidate), so an entry can never become a click that is bound to fail.
 
 ### Known limitations
@@ -255,6 +280,7 @@ Design notes:
 - Append-only semantics offer no un-delete: shadowed content cannot truly be restored, and deletion is irreversible (the original log survives; official tooling can rebuild a session from it).
 - Deleting during a running turn **stops the generation first**: it goes through the official `sessionController.cancel` (the same stop the UI's own button uses, keeping the queued inbox), waits for the turn to actually close (`turn/end` landed), and only then deletes. A stop that times out (15 s default), a refused stop, or a running compaction (which has no stop semantics) is still refused with a reason.
 - The system-prompt head (surface node 0) is protected.
+- A multi-select batch is a single request: every window is validated before anything is appended, so a batch cannot land half of itself — but what it removes is just as irreversible as a single delete.
 - The assistant action strip deletes the whole reply attempt; use the reasoning/tool card to remove a single step.
 - The process/disclosure row (“Thinking”, “N s”) carries no entry of its own: its scope is the whole reply, which the action strip already covers, so the duplicate was removed.
 - Content already removed from the model context by official compaction (`/compact`) no longer offers a delete action: it is not in the context any more and the transcript keeps it on purpose.
@@ -266,7 +292,7 @@ Design notes:
 
 ```sh
 cd dsh-delete-turn
-npm test                                    # 62 cases: pure logic + host route + real-validator contract + client DOM
+npm test                                    # 86 cases: pure logic + host route + real-validator contract + client DOM
 node tools/verify-real-session.mjs <session.v4.jsonl.zstd> [--turn N]
 ```
 

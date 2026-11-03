@@ -367,7 +367,7 @@ function createEnv(options = {}) {
       document.body.appendChild(row)
       return row
     },
-    snapshotFor(rows, seqOf) {
+    snapshotFor(rows, seqOf, nodeOf) {
       const nodes = new Map()
       for (const row of Array.isArray(rows) ? rows : [rows]) {
         const key = row.getAttribute('data-chat-flow-key')
@@ -375,11 +375,10 @@ function createEnv(options = {}) {
         // producer replaced is drawn from its live node - so a caller can pin
         // that seq and test the mapping in both directions.
         const seq = seqOf && typeof seqOf[key] === 'number' ? seqOf[key] : 3
-        nodes.set(key, {
-          kind: 'user',
-          data: { seq },
-          anchorSeq: seq,
-        })
+        // A caller may also dictate the node itself, for rows whose kind is not
+        // a message (an answer step, a tail, a failure card).
+        const override = nodeOf && nodeOf[key]
+        nodes.set(key, override ? { anchorSeq: seq, ...override } : { kind: 'user', data: { seq }, anchorSeq: seq })
       }
       return { nodes }
     },
@@ -458,6 +457,27 @@ function mountOverlay(options = {}) {
     })
   }
   return { env, controller: injected.controller, render, spec: entry.spec }
+}
+
+// The header entry is its own slot registration sharing the same per-session
+// controller; a test mounts it the way the host does.
+function mountHeader(options = {}) {
+  const env = mount(options)
+  const entry = env.components.get('conversation.session.header.utilities#delete-turn')
+  assert.ok(entry, 'the header utilities slot must register under its own id')
+  const injected = entry.spec.inject(options.sessionId || SESSION_ID)
+  return { env, controller: injected.controller }
+}
+
+function mountHeaderTree(env, controller) {
+  const entry = env.components.get('conversation.session.header.utilities#delete-turn')
+  const dict = env.locales.get('dsh-delete-turn')
+  const t = (key) => (dict && dict.zh[key]) || key
+  return entry.Component({
+    useDeletion: (selector) => selector(controller.getSnapshot()),
+    controller,
+    t,
+  })
 }
 
 // --- I4 hidden-row attribution ---------------------------------------------
@@ -1119,6 +1139,189 @@ test('a window that would swallow foreign content asks again, then forces', asyn
 
 // The settings card is exported so a composing bundle (dsh-as-aistudio) can
 // render THE SAME component on its own page instead of re-implementing it.
+// --- multi-select ------------------------------------------------------------
+
+test('the toggles appear only while the mode is on, and each mark is a toggle', async () => {
+  const { env, render, controller } = mountOverlay({ payload: TURN_PAYLOAD })
+  const row = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const snapshot = env.snapshotFor(row)
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  // Idle row: the host carries the toggle node but the row does not advertise
+  // it, which is what the stylesheet keys on - so nothing extra is drawn.
+  assert.equal(row.getAttribute('data-dshdt-select'), null, 'an idle row shows no toggle')
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1, 'the trash action is untouched')
+
+  controller.setSelecting(true)
+  render(snapshot)
+  await env.settle()
+
+  assert.equal(row.getAttribute('data-dshdt-select'), '1', 'the mode makes the toggle visible')
+  const check = row.querySelectorAll('.dshdt-check')
+  assert.equal(check.length, 1, 'one toggle rides in the row host')
+  assert.equal(check[0].parentElement, row, 'the toggle is pinned to the row itself, not to the hover strip')
+  assert.equal(check[0].getAttribute('aria-label'), '多选删除')
+
+  click(check[0])
+  assert.equal(controller.getSnapshot().selected.size, 1, 'a click marks the row')
+
+  render(snapshot)
+  await env.settle()
+  assert.equal(row.classList.contains('dshdt-select-on'), true, 'the row switches to select styling')
+  assert.equal(row.classList.contains('dshdt-checked'), true, 'and shows its mark')
+  assert.equal(check[0].getAttribute('aria-pressed'), 'true')
+  assert.equal(check[0].getAttribute('aria-label'), '已选中，再点一次取消')
+
+  click(check[0])
+  assert.equal(controller.getSnapshot().selected.size, 0, 'a second click clears the mark')
+  assert.equal(controller.getSnapshot().selecting, true, 'and leaves the mode open')
+
+  controller.setSelecting(false)
+  assert.equal(controller.getSnapshot().selecting, false)
+  assert.equal(controller.getSnapshot().selected.size, 0, 'leaving the mode drops every mark')
+
+  render(snapshot)
+  await env.settle()
+  assert.equal(check[0].parentElement.classList.contains('dshdt-action-host'), true, 'the toggle returns to the host')
+  assert.equal(row.getAttribute('data-dshdt-select'), null, 'and the row advertises nothing again')
+})
+
+test('the Session header carries the door into multi-select', () => {
+  const { env, controller } = mountHeader()
+  const idle = mountHeaderTree(env, controller)
+
+  assert.equal(idle.type, 'button')
+  assert.equal(idle.props['aria-pressed'], 'false')
+  assert.equal(idle.props['aria-label'], '多选删除')
+
+  idle.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  assert.equal(controller.getSnapshot().selecting, true, 'the header entry turns the mode on')
+
+  const active = mountHeaderTree(env, controller)
+  assert.equal(active.props['aria-pressed'], 'true')
+  assert.equal(active.props['aria-label'], '退出多选', 'and offers the way out again')
+  assert.match(active.props.className, /dshdt-header-select-on/)
+
+  active.props.onClick({ preventDefault() {}, stopPropagation() {} })
+  assert.equal(controller.getSnapshot().selecting, false, 'a second click leaves the mode')
+})
+
+test('the batch entry sends every marked row in one request', async () => {
+  const { env, render, controller } = mountOverlay({
+    payload: { ...TURN_PAYLOAD, surface: [3, 7] },
+    deleteResponses: [
+      {
+        status: 200,
+        body: {
+          ok: true,
+          replacementSeq: 30,
+          replacements: [29, 30],
+          hidden: [{ seq: 3, mode: 'batch' }, { seq: 7, mode: 'batch' }],
+          lastSeq: 30,
+        },
+      },
+    ],
+  })
+  const first = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const second = env.addRow({ key: 'k2', turn: 2, actions: true })
+  const snapshot = env.snapshotFor([first, second], { k1: 3, k2: 7 })
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  click(first.querySelectorAll('.dshdt-check')[0])
+  click(second.querySelectorAll('.dshdt-check')[0])
+  assert.equal(controller.getSnapshot().selected.size, 2, 'both rows are marked')
+
+  const before = deleteCallCount(env)
+  controller.requestBatch()
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'batch', count: 2 }, 'the dialog reports how many rows it holds')
+  assert.equal(deleteCallCount(env), before, 'asking first means nothing is deleted yet')
+
+  await controller.confirm()
+  const calls = env.state.fetchCalls.filter((call) => String(call.url).indexOf('/dsh-delete-turn/delete') !== -1)
+  assert.equal(calls.length, 1, 'one request carries the whole batch')
+  assert.deepEqual(JSON.parse(calls[0].init.body).targets, [{ mode: 'message', seq: 3 }, { mode: 'message', seq: 7 }])
+
+  const after = controller.getSnapshot()
+  assert.equal(after.dialog, null)
+  assert.equal(after.selecting, false, 'a landed batch leaves the mode')
+  assert.equal(after.selected.size, 0)
+  assert.equal(after.hidden.has(3), true, 'the landed window is remembered as hidden')
+  assert.equal(after.hidden.has(7), true)
+})
+
+test('an answer row with no scope of its own still earns the badge, aimed at the reply', async () => {
+  const { env, render, controller } = mountOverlay({
+    payload: { ...TURN_PAYLOAD, surface: [9], replyTurns: [4] },
+    deleteResponses: [
+      {
+        status: 200,
+        body: { ok: true, replacementSeq: 20, hidden: [{ seq: 9, mode: 'reply' }], lastSeq: 20 },
+      },
+    ],
+  })
+  const row = env.addRow({ key: 'a1', turn: 4 })
+  const snapshot = env.snapshotFor([row], { a1: 9 }, {
+    a1: { kind: 'assistant-step', data: { finalNode: { messageId: 'm1', seq: 9 } } },
+  })
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  // An answer never offers the single-row trash: that scope is the reply's,
+  // already drawn in the reply action strip, so a second icon would duplicate
+  // it. Only the badge rides here.
+  const host = row.querySelectorAll('.dshdt-action-host')[0]
+  assert.equal(host.getAttribute('data-dshdt-badge-only'), '1', 'the host exists only for the badge')
+  assert.equal(row.querySelectorAll('.dshdt-action')[0].onclick, null, 'its trash stays inert, so no second delete entry appears')
+
+  controller.setSelecting(true)
+  render(snapshot)
+  await env.settle()
+  const check = row.querySelectorAll('.dshdt-check')
+  assert.equal(check.length, 1, 'the mode gives the answer a toggle')
+  assert.equal(check[0].parentElement, row, 'the badge is pinned to the row')
+  assert.equal(check[0].getAttribute('aria-label'), '多选删除')
+
+  click(check[0])
+  assert.deepEqual([...controller.getSnapshot().selected.keys()], ['reply:t4'], 'ticking an answer marks its reply, not a seq')
+
+  controller.requestBatch()
+  assert.deepEqual(controller.getSnapshot().dialog, { mode: 'batch', count: 1 })
+  await controller.confirm()
+  const calls = env.state.fetchCalls.filter((call) => String(call.url).indexOf('/dsh-delete-turn/delete') !== -1)
+  assert.equal(calls.length, 1, 'one request carries the answer')
+  assert.deepEqual(JSON.parse(calls[0].init.body).targets, [{ mode: 'reply', turn: 4 }], 'the batch speaks reply, so the prompt survives')
+  assert.equal(controller.getSnapshot().selected.size, 0, 'a landed batch clears the marks')
+})
+
+test('a refused batch keeps the marks so the selection is not lost', async () => {
+  const { env, render, controller } = mountOverlay({
+    payload: { ...TURN_PAYLOAD, surface: [3, 7] },
+    deleteResponses: [{ status: 409, body: { ok: false, code: 'range-not-clean', details: { foreign: 2 } } }],
+  })
+  const first = env.addRow({ key: 'k1', turn: 1, actions: true })
+  const second = env.addRow({ key: 'k2', turn: 2, actions: true })
+  const snapshot = env.snapshotFor([first, second], { k1: 3, k2: 7 })
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  click(first.querySelectorAll('.dshdt-check')[0])
+  click(second.querySelectorAll('.dshdt-check')[0])
+  controller.requestBatch()
+  await controller.confirm()
+
+  const after = controller.getSnapshot()
+  assert.equal(after.failure, 'range-not-clean', 'the refusal is reported so the dialog can offer the forced retry')
+  assert.equal(after.foreignCount, 2)
+  assert.deepEqual(after.dialog, { mode: 'batch', count: 2 }, 'the dialog stays open on the same batch')
+  assert.equal(after.selected.size, 2, 'a refusal never costs the user their selection')
+})
+
 test('exports the settings card for a composing bundle', () => {
   const env = createEnv()
   assert.equal(typeof env.module.ConfigCard, 'function')

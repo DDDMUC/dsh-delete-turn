@@ -9,6 +9,7 @@ import {
   hiddenEntries,
   isBusy,
   messageIdOf,
+  planBatch,
   planRange,
   sourceOwnsPlugin,
   turnableSeqs,
@@ -554,4 +555,39 @@ test('turnableSeqs still advertises a turn whose window holds a foreign node', (
   // so a row is never offered only to fail.
   assert.deepEqual(turnableSeqs(withForeign, nodes), [4, 10, 17, 26])
   assert.deepEqual(planRange(withForeign, nodes, { mode: 'turn', seq: 10 }).foreign, [30])
+})
+
+test('a batch fuses neighbouring windows and keeps distant ones apart', () => {
+  const log = fourTurnLog()
+  const nodes = foldSurface(log).nodes
+  // Surface: [head 3, u-1 4, a-1 5, u-2 10, ctx 11, a-2 12, u-3 17, a-3 18, tool 20, head 25, u-4 26, a-4 27]
+  const far = planBatch(log, nodes, [{ mode: 'turn', seq: 4 }, { mode: 'turn', seq: 17 }])
+  assert.equal(far.length, 2, 'turn 1 and turn 3 are not neighbours')
+  assert.deepEqual(far.map((plan) => plan.shadowed), [nodes.slice(1, 3), nodes.slice(6, 9)])
+  assert.deepEqual(far.map((plan) => plan.mode), ['turn', 'turn'])
+
+  // Turn 1 and turn 2 are adjacent in surface order: ONE replacement, so the
+  // log grows by one event instead of two.
+  const fused = planBatch(log, nodes, [{ mode: 'turn', seq: 4 }, { mode: 'turn', seq: 10 }])
+  assert.equal(fused.length, 1)
+  assert.equal(fused[0].mode, 'batch')
+  assert.deepEqual(fused[0].shadowed, nodes.slice(1, 6))
+  assert.equal(fused[0].startSeq, nodes[1])
+  assert.equal(fused[0].endSeq, nodes[5])
+  assert.deepEqual(fused[0].foreign, [])
+  assert.deepEqual(fused[0].parts, [{ mode: 'turn', targetSeq: 4 }, { mode: 'turn', targetSeq: 10 }])
+})
+
+test('a batch is planned against one surface, so a part inside another is not stale', () => {
+  const log = fourTurnLog()
+  const nodes = foldSurface(log).nodes
+  // A message inside its own turn: the turn window already covers it, so the
+  // pair plans as ONE window instead of the second becoming stale after the
+  // first lands.
+  const plans = planBatch(log, nodes, [{ mode: 'message', seq: 10 }, { mode: 'turn', seq: 10 }])
+  assert.equal(plans.length, 1)
+  assert.deepEqual(plans[0].shadowed, nodes.slice(3, 6))
+  assert.deepEqual(planBatch(log, nodes, [{ mode: 'turn', seq: 10 }, { mode: 'turn', seq: 10 }]).length, 1, 'repeats collapse')
+  assert.throws(() => planBatch(log, nodes, []), (error) => error instanceof PlanError && error.code === 'invalid')
+  assert.throws(() => planBatch(log, nodes, [null]), (error) => error instanceof PlanError && error.code === 'invalid')
 })

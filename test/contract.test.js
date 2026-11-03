@@ -240,6 +240,47 @@ test('a whole-turn delete is one range replace and passes the real validator', a
   coldRead(header, reloaded.snapshotEvents())
 })
 
+test('a multi-select batch lands one replace per window and still passes the real validator', async () => {
+  const { session, header } = conversation()
+  const before = [...session.surface.nodes]
+  const seqBefore = session.seq
+  const call = routeHarness(session)
+  // Turn B and turn D are not neighbours - C sits between them - so the batch
+  // is exactly what the client's multi-select sends: two windows, two carriers,
+  // landed back to back in surface order.
+  const response = await call({ sessionId: header.id, targets: [{ mode: 'turn', turn: 2 }, { mode: 'turn', turn: 4 }] })
+  assert.equal(response.status, 200, JSON.stringify(response.payload))
+  assert.equal(response.payload.replacements.length, 2, 'two windows, two carriers')
+  const [first, second] = response.payload.replacements
+  assert.equal(response.payload.replacementSeq, second)
+
+  const events = session.snapshotEvents()
+  assert.equal(events.length, seqBefore + 2, 'one append per window and nothing else')
+  assert.equal(events[first].surfaceOp.op, 'replace')
+  assert.equal(events[second].surfaceOp.op, 'replace')
+
+  // Both windows left the surface; A and C keep their nodes untouched, and each
+  // carrier stands exactly where its own window stood.
+  const after = [...session.surface.nodes]
+  const shadowed = response.payload.hidden.map((item) => item.seq)
+  const survivors = before.filter((seq) => !shadowed.includes(seq))
+  assert.deepEqual(after, [...survivors.slice(0, 2), first, ...survivors.slice(2), second], 'A, C and the two carriers, in order')
+
+  // The transcript shows A and C only; each carrier is its own extra row.
+  assert.deepEqual(visibleShape(session, new Set([first, second])), ['user:A', 'assistant:A1', 'user:C', 'assistant:C1 working', 'tool:C result', 'assistant:C1 final'])
+
+  // The strict cold read accepts the log after BOTH windows landed - the part a
+  // batch could plausibly get wrong by validating each window separately.
+  const artifact = coldRead(header, events)
+  assert.equal(artifact.events.length, events.length)
+  const reloaded = Session.create(header.id, artifact.events, header)
+  assert.deepEqual(visibleShape(reloaded, new Set([first, second])), ['user:A', 'assistant:A1', 'user:C', 'assistant:C1 working', 'tool:C result', 'assistant:C1 final'])
+  // Numbering was never touched: the next real turn follows the closed count.
+  const closed = events.filter((event) => event.type === 'turn/end').length
+  plainTurn(reloaded, closed + 1, 'E', 'E1')
+  coldRead(header, reloaded.snapshotEvents())
+})
+
 test('the negative control: the platform refuses a turn number that does not follow the log', () => {
   const { session, header } = conversation()
   // A delete appends no turn; nothing may reuse a closed number either.

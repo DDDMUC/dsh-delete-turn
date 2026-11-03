@@ -4,6 +4,7 @@
 //
 //   GET  /dsh-delete-turn/state?sessionId=<id>
 //   POST /dsh-delete-turn/delete   { sessionId, mode, seq?, messageId?, turn? }
+//                                  { sessionId, targets: [{ mode, seq?, turn? }] }
 //
 // A deletion appends ONE turn-less `user/message` carrier carrying the official
 // surface intent `{ surfaceOp: { op: 'replace', startSeq, endSeq } }` and the
@@ -37,6 +38,7 @@ import {
   hiddenEntriesOfFold,
   isBusy,
   openTurn,
+  planBatch,
   planRange,
   turnableSeqs,
 } from './logic.js'
@@ -413,8 +415,13 @@ async function stopActiveTurn(ctx, sessionId, events) {
 }
 
 async function deleteTarget(ctx, sessionId, body) {
+  // Two shapes: one target (`mode` + address) or a multi-select batch
+  // (`targets`). Both end in the SAME append path - a batch is just several
+  // disjoint range replaces landed back to back.
+  const batch = Array.isArray(body.targets)
+  if (batch && body.targets.length === 0) throw new HttpError(400, 'invalid', 'targets must not be empty')
   const mode = typeof body.mode === 'string' ? body.mode : ''
-  if (!MODES.has(mode)) throw new HttpError(400, 'invalid', 'mode must be message, step, reply or turn')
+  if (!batch && !MODES.has(mode)) throw new HttpError(400, 'invalid', 'mode must be message, step, reply or turn')
   const session = await resolveSession(ctx, sessionId)
   if (!session || typeof session.append !== 'function') {
     throw new HttpError(409, 'session-not-active', 'the session is not open in DSH')
@@ -431,17 +438,21 @@ async function deleteTarget(ctx, sessionId, body) {
   }
 
   const surfaceNodes = surfaceOf(ctx, sessionId, events)
-  let plan
+  let plans
   try {
-    plan = planRange(events, surfaceNodes, {
-      mode,
-      seq: typeof body.seq === 'number' ? body.seq : undefined,
-      messageId: typeof body.messageId === 'string' ? body.messageId : undefined,
-      turn: typeof body.turn === 'number' ? body.turn : undefined,
-    })
+    plans = batch
+      ? planBatch(events, surfaceNodes, body.targets)
+      : [
+          planRange(events, surfaceNodes, {
+            mode,
+            seq: typeof body.seq === 'number' ? body.seq : undefined,
+            messageId: typeof body.messageId === 'string' ? body.messageId : undefined,
+            turn: typeof body.turn === 'number' ? body.turn : undefined,
+          }),
+        ]
   } catch (error) {
     if (error instanceof PlanError) {
-      const status = error.code === 'not-deletable' ? 400 : 409
+      const status = error.code === 'not-deletable' || error.code === 'invalid' ? 400 : 409
       throw new HttpError(status, error.code, error.message)
     }
     throw error
@@ -451,14 +462,18 @@ async function deleteTarget(ctx, sessionId, body) {
   // foreign injected row, say). Deleting them is not refused - it is a decision
   // the user must make explicitly: without `force` the route reports how many
   // there are, and the client turns that into a second, forced confirmation.
-  if (plan.foreign.length > 0 && body.force !== true) {
-    throw new HttpError(409, 'range-not-clean', `the window would also remove ${plan.foreign.length} unrelated node(s)`, { foreign: plan.foreign.length })
+  const foreignCount = plans.reduce((sum, plan) => sum + plan.foreign.length, 0)
+  if (foreignCount > 0 && body.force !== true) {
+    throw new HttpError(409, 'range-not-clean', `the window would also remove ${foreignCount} unrelated node(s)`, { foreign: foreignCount })
   }
 
   // The live surface is the append authority; a node that vanished between the
-  // read and this check means another writer landed first.
-  for (const seq of plan.shadowed) {
-    if (!surfaceNodes.includes(seq)) throw new HttpError(409, 'stale', 'the session changed, retry')
+  // read and this check means another writer landed first. Every window is
+  // checked before the first append, so a batch can never land half of itself.
+  for (const plan of plans) {
+    for (const seq of plan.shadowed) {
+      if (!surfaceNodes.includes(seq)) throw new HttpError(409, 'stale', 'the session changed, retry')
+    }
   }
 
   // The carrier must be a turn-less `user/message`.
@@ -477,31 +492,69 @@ async function deleteTarget(ctx, sessionId, body) {
   // safest accepted content is a single ZERO-WIDTH SPACE (a readable marker
   // like "[deleted]" is quoted back by the model, and empty content is refused
   // by gateways whose adapter predates that skip).
-  let replacement
-  try {
-    replacement = session.append(
-      'user/message',
-      {
-        id: randomUUID(),
-        role: 'user',
-        content: silentCarrierFor(ctx, events) ? [] : [{ type: 'text', text: '\u200b' }],
-        // v4 format: plugin wrappers are retired; the producer kind carries the id.
-        source: { kind: `plugin:${PLUGIN_ID}` },
-      },
-      {
-        surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
-        sourceEventSeqs: plan.shadowed,
-      },
-    )
-  } catch (error) {
-    throw new HttpError(409, 'stale', `the surface refused the replacement: ${String((error && error.message) || error)}`)
+  const replacements = []
+  const hidden = []
+  const silent = silentCarrierFor(ctx, events)
+  // 标注（给日志读者用的“注释”，不是替换语义）：整轮删除才会让可见轮号与日志轮号
+  // 分叉，所以只有 `mode: 'turn'` 成为墓碑（tombstone）。`deleteIndex` 是这条记录的
+  // 序号，配合 `deletedTurn` 足以复原“可见轮 ↔ 日志轮”的映射：
+  //   可见轮(L) = L − #{ 已删日志轮 < L }
+  let deleteOrdinal = 0
+  for (const event of events) {
+    if (event?.data?.source?.kind === `plugin:${PLUGIN_ID}` && Number.isSafeInteger(event?.data?.source?.deletedTurn)) deleteOrdinal += 1
+  }
+  // Ascending surface order, so each append is validated against a log the
+  // previous one already changed - the windows are disjoint, so a later
+  // window's anchors are untouched by an earlier append.
+  for (const plan of plans) {
+    // 一条载体一条注释；整轮删除才递增墓碑序号（同一批里的多轮删除必须各占一个号）。
+    const carrierSource = { kind: `plugin:${PLUGIN_ID}`, op: 'delete', turn: plan.turn }
+    if (plan.mode === 'turn') {
+      deleteOrdinal += 1
+      carrierSource.deletedTurn = plan.turn
+      carrierSource.deleteIndex = deleteOrdinal
+    }
+    let replacement
+    try {
+      replacement = session.append(
+        'user/message',
+        {
+          id: randomUUID(),
+          role: 'user',
+          content: silent ? [] : [{ type: 'text', text: '\u200b' }],
+          // v4 format: plugin wrappers are retired; the producer kind carries the id.
+          // `op` / `turn` 让任何读者一眼看出“谁、第几轮、删了什么”；整轮删除额外写
+          // `deletedTurn` + `deleteIndex`，它是可见轮号与日志轮号之间的唯一桥梁。
+          source: carrierSource,
+        },
+        {
+          surfaceOp: { op: 'replace', startSeq: plan.startSeq, endSeq: plan.endSeq },
+          sourceEventSeqs: plan.shadowed,
+        },
+      )
+    } catch (error) {
+      // A window refused after an earlier one already landed: report it as a
+      // partial batch instead of pretending nothing happened, so the client can
+      // re-read the log and show the truth.
+      if (replacements.length > 0) {
+        await flushSession(ctx, session).catch(() => undefined)
+        throw new HttpError(409, 'partial', `only ${replacements.length} of ${plans.length} window(s) landed: ${String((error && error.message) || error)}`, {
+          landed: replacements.length,
+          total: plans.length,
+        })
+      }
+      throw new HttpError(409, 'stale', `the surface refused the replacement: ${String((error && error.message) || error)}`)
+    }
+    replacements.push(replacement.seq)
+    for (const seq of plan.shadowed) hidden.push({ seq, mode: plan.mode })
   }
   const flush = await flushSession(ctx, session)
 
   return {
-    replacementSeq: replacement.seq,
+    replacementSeq: replacements[replacements.length - 1],
+    ...(replacements.length > 1 ? { replacements } : {}),
     ...flush,
-    hidden: plan.shadowed.map((seq) => ({ seq, mode: plan.mode })),
+    hidden,
   }
 }
 
