@@ -164,6 +164,25 @@ MIT
 
 ---
 
+### 日志里的标注
+
+每次删除追加的载体除了 `surfaceOp`，还会在 `source` 里写：
+
+```json
+{ "kind": "plugin:dsh-delete-turn", "op": "delete", "turn": 3,
+  "deletedTurn": 3, "deleteIndex": 1 }
+```
+
+- `deletedTurn` / `deleteIndex` **只有整轮删除**才写（行内删除不会让轮次消失）；
+- 有了这两个字段，任何读者都能还原「可见轮 ↔ 日志轮」：
+
+  ```
+  可见轮(L) = L − #{ 已删的日志轮 < L }
+  日志轮(V) = 第 V 个没被删的正整数
+  ```
+
+- 同一批里删多轮时，每条载体各占一个递增的 `deleteIndex`。
+
 ## English
 
 <div align="center">
