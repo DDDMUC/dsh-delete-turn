@@ -1201,7 +1201,7 @@ test('the Session header carries the door into multi-select', () => {
 
   const active = mountHeaderTree(env, controller)
   assert.equal(active.props['aria-pressed'], 'true')
-  assert.equal(active.props['aria-label'], '退出多选', 'and offers the way out again')
+  assert.equal(active.props['aria-label'], '取消', 'and offers the way out again')
   assert.match(active.props.className, /dshdt-header-select-on/)
 
   active.props.onClick({ preventDefault() {}, stopPropagation() {} })
