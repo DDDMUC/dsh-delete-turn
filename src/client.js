@@ -1606,6 +1606,19 @@ window.__ModuleLoader__.load({
           AskBeforeDeleteOption,
         ),
       )
+
+      // 同一张卡也挂在包自己的页面上（`#/panel/plugins/dsh-delete-turn`），
+      // 而不是只藏在 `…/dsh-delete-turn/dsh-delete-turn` 那一层。
+      ctx.slots.inject('plugins.bundle.config', () =>
+        ctx.slots.register(
+          {
+            name: 'plugins.bundle.config',
+            key: 'dsh-delete-turn',
+            locale: NS,
+          },
+          AskBeforeDeleteOption,
+        ),
+      )
     }
 
     exports.apply = apply
