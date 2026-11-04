@@ -1019,11 +1019,11 @@ test('a failure card stays while its turn still has a visible content row', asyn
   assert.equal(card.hasAttribute('data-dshdt-hidden'), false, 'a live turn keeps its failure card')
 })
 
-// --- the plugin page: "ask before deleting" (slot plugins.row.config) -------
+// --- the plugin page: "ask before deleting" (slot plugins.bundle.config) -------
 
 function rowConfigEntry(env) {
   for (const entry of env.components.values()) {
-    if (entry.spec.name === 'plugins.row.config') return entry
+    if (entry.spec.name === 'plugins.bundle.config') return entry
   }
   return undefined
 }
@@ -1035,8 +1035,8 @@ function deleteCallCount(env) {
 test('the plugin page registers a row.config entry under the bundle#row key', () => {
   const env = mount()
   const entry = rowConfigEntry(env)
-  assert.ok(entry, 'the settings page must register a plugins.row.config entry')
-  assert.equal(entry.spec.key, 'dsh-delete-turn#dsh-delete-turn', 'the key is <bundle>#<row id>')
+  assert.ok(entry, 'the settings page must register a plugins.bundle.config entry')
+  assert.equal(entry.spec.key, 'dsh-delete-turn', 'the key is <bundle>#<row id>')
 })
 
 test('the row.config summary reports the current ask state', () => {
