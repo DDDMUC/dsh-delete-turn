@@ -345,6 +345,9 @@ function idSeqMap(events, surface) {
     const data = event.data ?? {}
     const id = data.id ?? data.message?.id ?? data.callId ?? data.message?.toolCallId
     if (typeof id === 'string' && id !== '') out[id] = event.seq
+    // 前端的 flow-key 有时带的是发送时的 rpcId，而不是消息 id。
+    const rpcId = data.source?.rpcId ?? data.message?.source?.rpcId
+    if (typeof rpcId === 'string' && rpcId !== '') out[rpcId] = event.seq
   }
   return out
 }
