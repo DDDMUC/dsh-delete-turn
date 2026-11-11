@@ -1177,6 +1177,42 @@ window.__ModuleLoader__.load({
     const CONTENT_KINDS = new Set(['user', 'context', 'steering', 'tool-call', 'assistant-step'])
     const DISCLOSURE_KINDS = new Set(['turn-error', 'model-retry', 'turn-tail', 'turn-process'])
 
+    /** 调试开关：`localStorage['dsh-delete-turn:debug'] = '1'` 时打印跳过原因。 */
+    function debugOn() {
+      try {
+        return typeof localStorage !== 'undefined' && localStorage.getItem('dsh-delete-turn:debug') === '1'
+      } catch {
+        return false
+      }
+    }
+
+    const debugSeen = new Set()
+
+    /**
+     * 打一条「这行为什么没有删除入口」的诊断；同一个 key 只打一次。
+     *
+     * @param {string} key - flow key。
+     * @param {Element} row - 行元素。
+     * @param {string} reason - 原因。
+     */
+    function debugSkip(key, row, reason) {
+      if (!debugOn()) return
+      const stamp = key + '|' + reason
+      if (debugSeen.has(stamp)) return
+      debugSeen.add(stamp)
+      try {
+        console.info('[dshdt] skip', {
+          reason,
+          key,
+          flowKind: row.getAttribute('data-chat-flow-kind'),
+          turn: row.getAttribute('data-chat-turn'),
+          text: String(row.innerText ?? '').slice(0, 24),
+        })
+      } catch {
+        // console 不可用就算了。
+      }
+    }
+
     const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
     const USERISH_FLOW_KINDS = new Set(['user', 'steering', 'context'])
 
@@ -1252,6 +1288,7 @@ window.__ModuleLoader__.load({
           if (userish) node = nodeFromKey(key, view)
         }
         if (!node) {
+          debugSkip(key, row, 'no-node')
           // Process group rows carry a composite key ("["process", memberKey,
           // part]") and wrap ordinary member nodes. Hide the group together
           // with its anchor member, so deleting a turn's content leaves no
@@ -1288,7 +1325,10 @@ window.__ModuleLoader__.load({
           deletable && turnTargetFor(node) !== null && view.turnSeqs.has(target.seq) ? liveTarget(turnTargetFor(node), view.edits) : null
         const pickTarget = target !== null ? target : deletable ? replyPick : null
         if (deletable && pickTarget !== null) injectRowAction(row, node, target, turnTarget, view, controller, t, pickTarget)
-        else removeRowAction(row)
+        else {
+          removeRowAction(row)
+          debugSkip(key, row, hidden ? 'hidden' : target === null ? 'no-target' : !covered ? 'not-covered' : 'not-deletable')
+        }
         if (deletable && target !== null && turnTarget !== null) row.dataset.dshdtTurn = '1'
         else delete row.dataset.dshdtTurn
         if (!hidden && covered && !rowDeletable(node, seqs, view)) row.dataset.dshdtNoTarget = '1'
