@@ -467,6 +467,22 @@ window.__ModuleLoader__.load({
         return pending
       }
 
+      /**
+       * 撤回一条还没落盘的排队消息（宿主的输入队列）。
+       *
+       * @param {string} key - 行的 flow key。
+       * @returns {Promise<void>} 撤回完成。
+       */
+      async recallQueue(key) {
+        const response = await fetch(`${ROUTE_PREFIX}/queue-remove`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId: this.sessionId, key }),
+        })
+        const data = await response.json().catch(() => ({}))
+        if (!response.ok || !data.ok) throw new Error(data && data.error ? String(data.error) : `HTTP ${response.status}`)
+      }
+
       // Entering/leaving multi-select. Leaving drops the selection, so a later
       // entry never starts with rows the user no longer sees as marked.
       setSelecting(on) {
@@ -1288,6 +1304,13 @@ window.__ModuleLoader__.load({
           if (userish) node = nodeFromKey(key, view)
         }
         if (!node) {
+          const flowKindName = row.getAttribute('data-chat-flow-kind')
+          const pendingUserish = flowKindName === null || flowKindName === '' || USERISH_FLOW_KINDS.has(flowKindName)
+          if (pendingUserish) {
+            debugSkip(key, row, 'queued')
+            injectQueueAction(row, key, controller)
+            continue
+          }
           debugSkip(key, row, 'no-node')
           // Process group rows carry a composite key ("["process", memberKey,
           // part]") and wrap ordinary member nodes. Hide the group together
@@ -1350,6 +1373,45 @@ window.__ModuleLoader__.load({
       // session), refresh it so the ledger and the gates stay current.
       if (view.surfaceReady && maxSeq > view.surfaceThrough) controller.requestRefresh()
       updateTurnNavigation()
+    }
+
+    /**
+     * 给「宿主画了、日志里还没有」的行注入撤回入口。
+     *
+     * 这类行是输入队列里的待发消息：有官方复制，没有 seq。删除它们要调宿主的
+     * 队列接口，而不是写日志。
+     *
+     * @param {Element} row - 行元素。
+     * @param {string} key - flow key（含消息 id）。
+     * @param {object} controller - 控制器。
+     */
+    function injectQueueAction(row, key, controller) {
+      let host = row.querySelector('.dshdt-queue-host')
+      if (host === null) {
+        host = document.createElement('span')
+        host.className = 'dshdt-action-host dshdt-queue-host'
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.className = 'dshdt-action dshdt-queue'
+        button.setAttribute('aria-label', '撤回排队消息')
+        button.title = '撤回排队消息'
+        button.innerHTML = ICON_MARKUP
+        if (typeof button.addEventListener === 'function') button.addEventListener('click', (event) => {
+          event.preventDefault()
+          event.stopPropagation()
+          void controller.recallQueue(key).then(
+            () => {
+              host.remove()
+              row.style.display = 'none'
+            },
+            () => {
+              button.title = '撤回失败：这条消息可能已经开始发送'
+            },
+          )
+        })
+        host.appendChild(button)
+        row.appendChild(host)
+      }
     }
 
     /** The turn a rail mark addresses: its label carries the real turn number. */

@@ -588,6 +588,41 @@ async function deleteTarget(ctx, sessionId, body) {
   }
 }
 
+
+// --- queue (unsent messages) -------------------------------------------------
+
+/**
+ * 撤回一条「还没落盘」的排队消息。
+ *
+ * 这类消息只在宿主的输入队列里（`agent/inbox/spliced`），日志里没有
+ * `user/message`，所以按轮次删除的路径碰不到它们。宿主的 sessionController 有
+ * `updateQueue({ sessionId, itemId, action: { kind: 'remove' } })`，这里用它。
+ *
+ * @param {object} ctx - cordis 上下文。
+ * @param {string} sessionId - 会话 id。
+ * @param {string} key - 行的 flow key（里面带消息 id / rpcId）。
+ * @returns {Promise<{ itemId: string }>} 被撤回的队列项 id。
+ */
+async function recallQueueItem(ctx, sessionId, key) {
+  const controller = ctx.get('sessionController')
+  if (!controller || typeof controller.updateQueue !== 'function') {
+    throw new HttpError(409, 'unsupported', 'sessionController.updateQueue is unavailable')
+  }
+  const ids = String(key ?? '').match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi) ?? []
+  if (ids.length === 0) throw new HttpError(400, 'invalid', 'the row key names no message id')
+  let lastError
+  for (const itemId of ids) {
+    try {
+      const result = await controller.updateQueue({ sessionId, itemId, action: { kind: 'remove' } })
+      if (result === undefined || result.ok !== false) return { itemId }
+      lastError = result.error
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw new HttpError(404, 'not-queued', `no queued message matches this row: ${String(lastError && lastError.message ? lastError.message : lastError ?? '')}`)
+}
+
 // --- http --------------------------------------------------------------------
 
 function isLoopbackAddress(address) {
@@ -726,6 +761,37 @@ export function apply(ctx) {
         },
       }),
     )
+    fiber.effect(() =>
+      webServer.register({
+        kind: 'exact',
+        path: `${ROUTE_PREFIX}/queue-remove`,
+        handler: async (req, res) => {
+          if (!guard(req, res)) return
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { ok: false, code: 'method', error: 'POST only' })
+            return
+          }
+          let body = {}
+          try {
+            const raw = await readBody(req)
+            if (raw) body = JSON.parse(raw)
+          } catch {
+            sendJson(res, 400, { ok: false, code: 'invalid', error: 'malformed JSON body' })
+            return
+          }
+          try {
+            const sessionId = requireSessionId(typeof body.sessionId === 'string' ? body.sessionId.trim() : '')
+            const result = await recallQueueItem(ctx, sessionId, body.key)
+            sendJson(res, 200, { ok: true, ...result })
+          } catch (error) {
+            const status = error instanceof HttpError ? error.status : 500
+            const code = error instanceof HttpError ? error.code : 'internal'
+            sendJson(res, status, { ok: false, code, error: String((error && error.message) || error) })
+          }
+        },
+      }),
+    )
+
   }
 
   const webServer = ctx.get('webServer')
