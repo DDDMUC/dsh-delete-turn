@@ -446,8 +446,16 @@ window.__ModuleLoader__.load({
             for (const turn of Array.isArray(data.markerTurns) ? data.markerTurns : []) {
               if (typeof turn === 'number') markerTurns.add(turn)
             }
+            // 消息 id → seq：snapshot 缺行时按 key 里的 id 反查（官方的复制在，
+            // 我们的删除就也该在）。
+            const ids = {}
+            if (data.ids !== null && typeof data.ids === 'object') {
+              for (const [id, seq] of Object.entries(data.ids)) {
+                if (typeof seq === 'number') ids[id] = seq
+              }
+            }
             const surfaceThrough = typeof data.lastSeq === 'number' ? data.lastSeq : -1
-            this.publish({ hidden, hiddenVia, surface, turnSeqs, replyTurns, edits, markerTurns, busy: data.busy === true, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
+            this.publish({ hidden, hiddenVia, surface, turnSeqs, replyTurns, edits, markerTurns, ids, busy: data.busy === true, surfaceReady: true, surfaceThrough, loaded: true, loadError: false })
           })
           .catch(() => {
             this.publish({ loadError: true })
@@ -1169,6 +1177,39 @@ window.__ModuleLoader__.load({
     const CONTENT_KINDS = new Set(['user', 'context', 'steering', 'tool-call', 'assistant-step'])
     const DISCLOSURE_KINDS = new Set(['turn-error', 'model-retry', 'turn-tail', 'turn-process'])
 
+    const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
+    const USERISH_FLOW_KINDS = new Set(['user', 'steering', 'context'])
+
+    /**
+     * 从行 key 里恢复一个「用户消息」节点。
+     *
+     * snapshot 里没有这一行，不代表它不能删：官方的复制按钮就在同一行上。
+     * 宿主没有把 seq 写到 DOM 上，但 flow-key 里通常带着消息 id——用 `/state`
+     * 下发的 `ids`（id → seq）反查；再退一步，取 key 里落在 surface 上的数字。
+     *
+     * @param {string} key - `data-chat-flow-key`。
+     * @param {object} view - 插件状态（含 ids / surface）。
+     * @returns {object|null} 合成节点；恢复不出来时为 null。
+     */
+    function nodeFromKey(key, view) {
+      if (typeof key !== 'string' || key === '') return null
+      const ids = view !== null && view !== undefined && typeof view.ids === 'object' && view.ids !== null ? view.ids : {}
+      for (const match of key.matchAll(UUID_PATTERN)) {
+        const seq = ids[match[0]]
+        if (typeof seq === 'number') return { kind: 'user', data: { seq }, anchorSeq: seq }
+      }
+      // key 里没有 id：取最大、且确实在表面上的数字（flow key 常见形态是
+      // `["user", 72]` 或 `user-72`）。
+      let best = -1
+      for (const match of key.matchAll(/\d+/g)) {
+        const value = Number(match[0])
+        if (!Number.isSafeInteger(value)) continue
+        if (view.surface instanceof Set && !view.surface.has(value)) continue
+        if (value > best) best = value
+      }
+      return best >= 0 ? { kind: 'user', data: { seq: best }, anchorSeq: best } : null
+    }
+
     function applyDom(snapshot, view, controller, t) {
       if (!snapshot || !snapshot.nodes || typeof snapshot.nodes.get !== 'function') return
       const animate = controller.consumeAnimate()
@@ -1204,7 +1245,12 @@ window.__ModuleLoader__.load({
           delete row.dataset.dshdtNoTarget
           continue
         }
-        const node = snapshot.nodes.get(key)
+        let node = snapshot.nodes.get(key)
+        if (!node) {
+          const flowKind = row.getAttribute('data-chat-flow-kind')
+          const userish = flowKind === null || flowKind === '' || USERISH_FLOW_KINDS.has(flowKind)
+          if (userish) node = nodeFromKey(key, view)
+        }
         if (!node) {
           // Process group rows carry a composite key ("["process", memberKey,
           // part]") and wrap ordinary member nodes. Hide the group together

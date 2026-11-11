@@ -324,6 +324,31 @@ function markerTurnsOf(events) {
   return [...turns].sort((a, b) => a - b)
 }
 
+
+/**
+ * 表面事件里「消息 id → seq」的映射。
+ *
+ * 浏览器半部的 snapshot 按 flow-key 索引节点；某些行（刚发出、未进入请求的消息）
+ * 宿主会渲染、却可能还不在 snapshot 里。这些行上的官方「复制」照常出现，我们的
+ * 删除按钮却查不到节点。把 id→seq 一起下发，客户端就能按行 key 里的 id 反查，
+ * 让「官方的有我们也有」成立。
+ *
+ * @param {object[]} events - 事件。
+ * @param {number[]} surface - 当前表面 seq。
+ * @returns {Record<string, number>} id → seq。
+ */
+function idSeqMap(events, surface) {
+  const live = new Set(surface)
+  const out = {}
+  for (const event of events) {
+    if (!live.has(event.seq)) continue
+    const data = event.data ?? {}
+    const id = data.id ?? data.message?.id ?? data.callId ?? data.message?.toolCallId
+    if (typeof id === 'string' && id !== '') out[id] = event.seq
+  }
+  return out
+}
+
 async function stateOf(ctx, sessionId) {
   const events = await readEvents(ctx, sessionId)
   if (!events) {
@@ -358,6 +383,8 @@ async function stateOf(ctx, sessionId) {
     // SAME planner check the route uses (see turnableSeqs), so a row never
     // advertises a turn delete the host would refuse.
     turnSeqs: turnableSeqs(events, surfaceNodes),
+    // 行 key 里的消息 id → seq：snapshot 缺节点时客户端靠它兜底。
+    ids: idSeqMap(events, surfaceNodes),
     // In-place rewrites by other producers (dsh-edit-turn): the transcript row
     // stays anchored to the original seq while the context holds the
     // replacement, so the browser half needs the chain to keep the row's

@@ -1329,3 +1329,19 @@ test('exports the settings card for a composing bundle', () => {
   const summary = env.module.ConfigCard({ view: 'summary', t: (key) => key })
   assert.equal(typeof summary, 'string', 'summary renders an inline one-liner')
 })
+
+test('a row missing from the snapshot still gets the delete entry when its key names a known id', async () => {
+  const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const payload = { ok: true, hidden: [], surface: [7], ids: { [id]: 7 }, replyTurns: [], edits: [], markerTurns: [], lastSeq: 7 }
+  const { env, render } = mountOverlay({ payload })
+  const row = env.addRow({ key: `["user","${id}"]` })
+  // The snapshot deliberately has no node for this row: the host draws it, the
+  // snapshot has not caught up. The official copy still appears, so must ours.
+  const snapshot = { nodes: new Map() }
+
+  render(snapshot)
+  await env.settle()
+  render(snapshot)
+
+  assert.equal(row.querySelectorAll('.dshdt-action').length, 1, 'the row action is injected')
+})
