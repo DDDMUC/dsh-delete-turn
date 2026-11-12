@@ -199,7 +199,7 @@ window.__ModuleLoader__.load({
       '.dshdt-action:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-state-error-primary,#d54941)}',
       '.dshdt-action:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
       '.dshdt-action:disabled{cursor:default;opacity:.4}',
-      '.dshdt-action svg{width:15px;height:15px}',
+      '.dshdt-action svg{width:16px;height:16px}',
       '.dshdt-action-host{display:inline-flex;align-items:center;justify-content:center}',
       '.dshdt-row{position:relative}',
       '.dshdt-floating{position:absolute;top:2px;right:6px;z-index:2;opacity:0;transition:opacity .12s}',
@@ -222,7 +222,7 @@ window.__ModuleLoader__.load({
       '.dshdt-turn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
       '.dshdt-turn:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
       '.dshdt-turn:disabled{cursor:default;opacity:.4}',
-      '.dshdt-turn svg{width:15px;height:15px}',
+      '.dshdt-turn svg{width:16px;height:16px}',
       '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
       // In multi-select the toggle is a badge pinned to the row itself: the
       // action strip of a message row only exists while the pointer is on it,
