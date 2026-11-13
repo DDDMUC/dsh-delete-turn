@@ -217,12 +217,12 @@ window.__ModuleLoader__.load({
       // its own class so the trash action's selector, its counts and the
       // interop contract stay exactly as they were; the row attribute turns it
       // on only where the host can plan the operation.
-      '.dshdt-turn{width:28px;height:28px;padding:6px;display:none;align-items:center;justify-content:center;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;transition:background-color .12s,color .12s}',
+      '.dshdt-turn{width:calc(28px + var(--dsh-content-font-delta,0px));height:calc(28px + var(--dsh-content-font-delta,0px));padding:6px;display:none;align-items:center;justify-content:center;border:none;border-radius:28px;background:transparent;color:var(--dsw-alias-label-tertiary,#8a8f98);cursor:pointer;transition:background-color .12s,color .12s}',
       '[data-dshdt-turn="1"] .dshdt-turn{display:inline-flex}',
       '.dshdt-turn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover,rgba(127,127,127,.12));color:var(--dsw-alias-button-primary-fill,#4d6bfe)}',
       '.dshdt-turn:focus-visible{outline:2px solid var(--dsw-alias-button-primary-fill,#4d6bfe);outline-offset:2px}',
       '.dshdt-turn:disabled{cursor:default;opacity:.4}',
-      '.dshdt-turn svg{width:15px;height:15px}',
+      '.dshdt-turn svg{width:calc(16px + var(--dsh-content-font-delta,0px));height:calc(16px + var(--dsh-content-font-delta,0px))}',
       '[data-dshdt-no-target="1"] .dshdt-action{display:none!important}',
       // In multi-select the toggle is a badge pinned to the row itself: the
       // action strip of a message row only exists while the pointer is on it,
