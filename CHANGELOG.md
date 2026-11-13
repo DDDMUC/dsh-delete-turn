@@ -4,9 +4,12 @@
 
 ## 中文
 
-**0.2.7** —— 图标尺寸统一。
+**0.2.7** —— 对比 v0.2.5：队列撤回、id 映射与图标尺寸。
 
-- 删除消息 / 删除这一轮 / 多选三个入口的图标随字号放大（`16px + delta`），按钮 `28px + delta`，不再被固定盒挤小。
+- 新增「撤回排队消息」：只存在于输入队列（`agent/inbox/spliced`）、日志里没有事件的消息，通过 `sessionController.updateQueue({ action: { kind: 'remove' } })` 撤回。
+- `/state` 的 `ids` 同时映射 `rpcId`，按行 key 里带的 id/rpcId 都能反查到 seq。
+- 删除消息 / 删除这一轮 / 多选三个入口的图标改为 `calc(16px + delta)`，按钮 `calc(28px + delta)`，不再被固定盒挤小。
+
 
 **0.2.6** —— 队列里的待发消息也能撤回了。
 
