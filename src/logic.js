@@ -367,6 +367,24 @@ function foreignNodes(shadowed, members, bySeq) {
  * @returns `{ mode, targetSeq, startSeq, endSeq, shadowed, turn, step }`.
  * @throws {PlanError} with a stable code when the target cannot be planned.
  */
+/**
+ * 窗口里不能包含表面节点 0（system prompt 头）：宿主的 append 合同只允许
+ * `system/message` 重写「恰好那一节点」，而我们的载体是一条无 turn 的
+ * `user/message`，覆盖到头节点会被 `assertSystemHeadRewrite` 直接拒收。
+ *
+ * 所以把头节点从窗口里摘掉，窗口从下一个节点开始。整段都是头节点时拒绝。
+ *
+ * @param {number[]} shadowed - 表面节点 seq 的连续窗口。
+ * @param {number} head - 表面节点 0 的 seq。
+ * @returns {number[]} 去掉头节点后的窗口。
+ */
+function withoutHead(shadowed, head) {
+  if (shadowed.length === 0 || shadowed[0] !== head) return shadowed
+  const rest = shadowed.slice(1)
+  if (rest.length === 0) throw new PlanError('not-deletable', 'the window would cover the system prompt head')
+  return rest
+}
+
 export function planRange(events, surfaceNodes, request) {
   const mode = request && request.mode
   const bySeq = new Map(events.map((event) => [event.seq, event]))
@@ -426,7 +444,7 @@ export function planRange(events, surfaceNodes, request) {
     const indexes = members.map((seq) => nodeIndex.get(seq))
     const startIdx = Math.min(...indexes)
     const endIdx = Math.max(...indexes)
-    const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
+    const shadowed = withoutHead(surfaceNodes.slice(startIdx, endIdx + 1), surfaceNodes[0])
     const foreign = foreignNodes(shadowed, members, bySeq)
     return {
       mode,
@@ -470,7 +488,7 @@ export function planRange(events, surfaceNodes, request) {
     const memberSet = new Set(members)
     const startIdx = nodeIndex.get(members[0])
     const endIdx = nodeIndex.get(members[members.length - 1])
-    const shadowed = surfaceNodes.slice(startIdx, endIdx + 1)
+    const shadowed = withoutHead(surfaceNodes.slice(startIdx, endIdx + 1), surfaceNodes[0])
     const foreign = foreignNodes(shadowed, members, bySeq)
     const closing = bySeq.get(members[members.length - 1])
     const step = closing && closing.type === 'assistant/message' && typeof closing.data.step === 'number' ? closing.data.step : 0
