@@ -415,7 +415,9 @@ async function stopActiveTurn(ctx, sessionId, events) {
   }
   const controller = ctx.get('sessionController')
   if (!controller || typeof controller.cancel !== 'function') {
-    throw new HttpError(409, 'busy', 'the running turn cannot be stopped here')
+    // 环境不支持停止（内核没有 sessionController.cancel）：这不是「任务还在跑」，
+    // 报 busy 会把人引到错误的排查方向。
+    throw new HttpError(409, 'stop-failed', 'the running turn cannot be stopped here: sessionController.cancel is unavailable')
   }
   let acknowledged = false
   let lastError = null
@@ -431,7 +433,9 @@ async function stopActiveTurn(ctx, sessionId, events) {
     }
   }
   if (!acknowledged) {
-    throw new HttpError(409, 'busy', `the stop request was refused: ${String((lastError && lastError.message) || lastError)}`)
+    // 停止请求被拒可能是内核 API 变了，也可能真的在忙：一律按 stop-failed 上报，
+    // 附带原始原因，不再包装成「任务正在运行」。
+    throw new HttpError(409, 'stop-failed', `the stop request was refused: ${String((lastError && lastError.message) || lastError)}`)
   }
   const deadline = Date.now() + stopWait.timeoutMs
   for (;;) {

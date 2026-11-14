@@ -4,11 +4,21 @@
 
 ## 中文
 
-**0.2.7** —— 对比 v0.2.5：队列撤回、id 映射与图标尺寸。
+**0.2.9** —— 宿主不再被 `/state` 的重复解码拖垮。
 
-- 新增「撤回排队消息」：只存在于输入队列（`agent/inbox/spliced`）、日志里没有事件的消息，通过 `sessionController.updateQueue({ action: { kind: 'remove' } })` 撤回。
-- `/state` 的 `ids` 同时映射 `rpcId`，按行 key 里带的 id/rpcId 都能反查到 seq。
-- 删除消息 / 删除这一轮 / 多选三个入口的图标改为 `calc(16px + delta)`，按钮 `calc(28px + delta)`，不再被固定盒挤小。
+- `/state` 先问宿主要内存快照（`session.snapshotEvents()`），只有冷会话才走
+  `readSession`（那条路会把整份日志重新解码并逐条深冻结，20MB 的日志要数秒）。
+- 派生结果按**事件数组引用**缓存：日志没动就直接返回上次的 payload，一次计算都不做。
+  （不用「事件数 + 末 seq」做键 —— 那个会撞，不同会话拿到同一份结果。）
+- 同一会话的并发请求单飞，不做各算各的。
+- 前端 `document.hidden` 时跳过刷新；记录往返耗时供退避使用。
+
+**0.2.8** —— 错误不再一律报「任务正在运行」。
+
+- 停止运行中的那一轮失败时，代码从 `busy` 改成 `stop-failed`，并把内核给的原始原因带出来；只有「压缩中」仍然报 `busy`，「停不下来」报 `stop-timeout`。以前内核 API 一变，用户会看到「会话正在进行中」这种误导提示，永远查不到真因。
+- 新增 `error.internal` 文案：插件内部异常说明「可能与当前内核不兼容，内容没有被删」。
+- 删除窗口计算加了 `withoutHead()` 兜底：万一窗口从头节点（system prompt）开始，把它摘掉再算，整段都是头节点才拒绝。当前内核下不可达，纯防御。
+
 
 
 **0.2.6** —— 队列里的待发消息也能撤回了。
@@ -99,6 +109,18 @@
 - **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。
 
 ## English
+
+**0.2.9** —— the host is no longer hammered by repeated `/state` decodes.
+
+- `/state` asks the host for its in-memory snapshot first (`session.snapshotEvents()`);
+  `readSession` (which re-decodes the whole log and deep-freezes every event — seconds
+  for a 20 MB log) is only used for cold sessions.
+- Derived results are cached by **events array identity**: an unchanged log returns
+  the previous payload without recomputing. (A `length:lastSeq` fingerprint collides
+  — different sessions can produce the same pair and receive each other's payload.)
+- Concurrent requests for one session share a single computation.
+- The client skips refreshes while `document.hidden`, and records round-trip cost
+  for backoff.
 
 **0.1.15** — the settings card is exported for composing bundles.
 

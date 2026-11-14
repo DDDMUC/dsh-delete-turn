@@ -420,7 +420,9 @@ test('the turn route refuses a busy session, an unknown mode and the head turn',
   const busyHarness = turnHarness(busy)
   const refused = await postDelete(busyHarness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
   assert.equal(refused.status, 409)
-  assert.equal(refused.payload.code, 'busy')
+  // 会话确实在跑，但这个 harness 没有可用的 sessionController.cancel：报
+  // stop-failed（附带真实原因），不再一律伪装成 busy。
+  assert.equal(refused.payload.code, 'stop-failed')
   assert.equal(busyHarness.calls.appends.length, 0, 'a busy session is never written')
 
   const idleHarness = turnHarness(turnEvents())
@@ -477,18 +479,20 @@ test('a compaction is never stopped', async () => {
   })
   const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
   assert.equal(status, 409)
+  // 压缩没有「停止」语义：这一条仍然是 busy，不能被误报成 stop-failed。
   assert.equal(payload.code, 'busy')
   assert.equal(cancelCalls, 0, 'a compaction bracket has no stop semantics')
   assert.equal(harness.calls.appends.length, 0)
 })
 
-test('a stop request that is refused keeps the busy refusal', async () => {
+test('a stop request that is refused reports stop-failed with its reason', async () => {
   const harness = turnHarness(openTurnLog(), {
     stop: () => ({ cancel: async () => { throw new Error('session "x" not found (not attached)') } }),
   })
   const { status, payload } = await postDelete(harness, { sessionId: SESSION_ID, mode: 'turn', turn: 2 })
   assert.equal(status, 409)
-  assert.equal(payload.code, 'busy')
+  assert.equal(payload.code, 'stop-failed', '停不住就是 stop-failed，不再伪装成 busy')
+  assert.match(String(payload.error ?? ''), /refused/, '把内核给的原始原因带出来')
   assert.equal(harness.calls.appends.length, 0)
 })
 
