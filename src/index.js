@@ -253,9 +253,19 @@ function eventsFromLive(session) {
   return undefined
 }
 
-// Live-preferred read through the public query service; the live session's own
-// snapshot is the fallback when the service is absent.
+// Live-first read.
+//
+// `sessionQuery.readSession` re-decodes the whole log from disk and then
+// `Session.create` replay-validates it (every event deep-frozen through
+// `snapshotSessionEvent`). For a 20 MB log that is seconds of CPU on the host
+// thread, and `/state` runs on every poll - that is what filled the host
+// (234 connections, 2.4 G RSS) on 2026-11-23. A session the host has open
+// already carries its events in memory; `snapshotEvents()` hands back that
+// array without decoding anything, so live comes first and the expensive
+// query path is only for cold sessions.
 async function readEvents(ctx, sessionId) {
+  const live = eventsFromLive(findLiveSession(ctx, sessionId))
+  if (live !== undefined && live.length > 0) return live
   const query = ctx.get('sessionQuery')
   if (query && typeof query.readSession === 'function') {
     try {
@@ -265,8 +275,61 @@ async function readEvents(ctx, sessionId) {
       // fall through to the live snapshot
     }
   }
-  const events = eventsFromLive(findLiveSession(ctx, sessionId))
-  return events ?? null
+  return eventsFromLive(findLiveSession(ctx, sessionId)) ?? null
+}
+
+// --- state payload cache -----------------------------------------------------
+//
+// The expensive part of `/state` is not `readEvents` alone: `foldSurface`,
+// the deletion ledger, `turnableSeqs` and `idSeqMap` all walk every event.
+// A poll that lands on an unchanged log would redo all of it. The signature is
+// `events.length + ':' + lastSeq` - the log is append-only, so only those two
+// numbers can change - and the cache is consulted BEFORE any computation.
+const STATE_CACHE_LIMIT = 8
+const stateCache = new Map()
+// One in-flight computation per session: a paused tab, several panel rows and
+// a transcript refresh can all ask at once; they share the single answer.
+const stateInflight = new Map()
+
+/**
+ * Cached `stateOf` payload for one session, or `undefined` when the read moved.
+ *
+ * The key is the events array **identity**, not a content fingerprint. A
+ * fingerprint like `length:lastSeq` collides: a reset or a sibling session can
+ * reach the same length and last seq while holding entirely different events,
+ * and the poll would then be answered from someone else's payload. Identity
+ * cannot collide — after any `append`, `snapshotEvents()` hands back a fresh
+ * array and the entry is recomputed; an unchanged log hands back the same
+ * object, which is exactly the poll we want to make free.
+ *
+ * @param sessionId - session id.
+ * @param events - the array just read.
+ * @returns payload or undefined.
+ */
+function cachedState(sessionId, events) {
+  const hit = stateCache.get(sessionId)
+  return hit !== undefined && hit.eventsRef === events ? hit.value : undefined
+}
+
+function storeState(sessionId, events, value) {
+  stateCache.set(sessionId, { eventsRef: events, value })
+  if (stateCache.size > STATE_CACHE_LIMIT) stateCache.delete(stateCache.keys().next().value)
+}
+
+/**
+ * Run one computation per session, sharing the in-flight promise.
+ * @param sessionId - session id.
+ * @param compute - async factory returning the payload.
+ * @returns payload.
+ */
+function singleFlight(sessionId, compute) {
+  const running = stateInflight.get(sessionId)
+  if (running !== undefined) return running
+  const pending = compute().finally(() => {
+    stateInflight.delete(sessionId)
+  })
+  stateInflight.set(sessionId, pending)
+  return pending
 }
 
 function surfaceOf(ctx, sessionId, events) {
@@ -353,6 +416,10 @@ function idSeqMap(events, surface) {
 }
 
 async function stateOf(ctx, sessionId) {
+  return singleFlight(sessionId, () => computeState(ctx, sessionId))
+}
+
+async function computeState(ctx, sessionId) {
   const events = await readEvents(ctx, sessionId)
   if (!events) {
     // A named session with nothing in it yet is an EMPTY session, not a failed
@@ -371,11 +438,13 @@ async function stateOf(ctx, sessionId) {
       lastSeq: -1,
     }
   }
+  const cached = cachedState(sessionId, events)
+  if (cached !== undefined) return cached
   const folded = foldSurface(events)
   // The live surface is what a delete will actually be validated against, so
   // expose exactly that when the session is open.
   const surfaceNodes = surfaceOf(ctx, sessionId, events)
-  return {
+  const payload = {
     hidden: hiddenEntriesOfFold(folded, events),
     // The current surface lets the browser half tell a row that still has
     // context content from one whose content a compaction already removed;
@@ -400,6 +469,8 @@ async function stateOf(ctx, sessionId) {
     busy: isBusy(events),
     lastSeq: events.length > 0 ? events[events.length - 1].seq : -1,
   }
+  storeState(sessionId, events, payload)
+  return payload
 }
 
 // The user pressed delete while a turn was still generating: stopping that turn
