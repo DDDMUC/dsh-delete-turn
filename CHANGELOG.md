@@ -4,6 +4,18 @@
 
 ## 中文
 
+**未发布** —— 观察者不再把自己写的变更当成新消息。
+
+- 修改记录：`applyDom` 会往它自己监听的 `document.body` 子树里写注入宿主，
+  重新插入宿主本身就是一个 childList 变更，于是每次 pass 都会把下一次 pass
+  排上队，循环自持。实测（176 步、会话空闲）：单核 100% 连续 20 秒、166 个
+  >50ms 任务、每秒约 320 次宿主移动与 200 次样式重算、帧率 62 → 11；最小化
+  窗口后降到 5%，是"帧驱动"而非"定时器驱动"的指纹。
+- 现在一批 MutationRecord 如果只提到本插件自己注入的节点，就不再排下一次
+  pass；提到宿主画的节点（新行、被重渲染的行）仍然照常唤醒。带 `dshdt-` 类
+  但由宿主画的行（`data-chat-flow-key`）依旧算外来节点。
+- 补了三条回归测试：仅自有节点不唤醒、宿主行唤醒、被本插件加过类的宿主行仍唤醒。
+
 **0.2.9** —— 宿主不再被 `/state` 的重复解码拖垮。
 
 - `/state` 先问宿主要内存快照（`session.snapshotEvents()`），只有冷会话才走
@@ -109,6 +121,23 @@
 - **修复：兄弟插件隐藏的行，本插件不再替它显示出来**。旧的「恢复可见」分支无条件把 `row.style.display` 清成 `''`——那一行若正被 **dsh-edit-turn**（`data-dshet-hidden`）或 **dsh-rerun-turn**（`data-dsrr-hidden`）按归属属性隐藏着，本插件一恢复就把别人的隐藏一并抹掉（行「复活」）。现在按契约 §4 在本地拷入 `foreignHideOn(row,'dshdt')`：交还自己那份归属属性与折叠样式之前先确认没有别的归属属性，有则**保持 `display:none`**，等对方自己解除；轮次导航标记同理，别人声明隐藏的回合不再留下跳转点。新增 `test/client.test.js`（用 DOM stub 加载真实 client bundle，8 例）。
 
 ## English
+
+**Unreleased** —— the observer no longer treats its own writes as news.
+
+- The transcript overlay observes `document.body` to pick up rows the host
+  appends, and `applyDom` writes injected hosts into that same subtree.
+  Re-inserting a host is itself a childList change, so every pass queued the
+  next one and the loop never settled. Measured live (176-step transcript,
+  session idle): one core at 100% for 20 s straight, 166 tasks over 50 ms,
+  ~320 host moves and ~200 style recalculations per second, frame rate 62 → 11.
+  Minimising the window dropped it to 5% — the fingerprint of a frame-driven
+  loop, not a timer.
+- A MutationRecord batch that names only nodes this plugin injected no longer
+  schedules a pass. A batch naming a node the host drew (a new row, a
+  rereendered row) still does, and a row that carries `dshdt-` classes but was
+  drawn by the host (`data-chat-flow-key`) still counts as foreign.
+- Three regression tests: self-only batch ignored, host row wakes the pass,
+  classed host row still wakes it.
 
 **0.2.9** —— the host is no longer hammered by repeated `/state` decodes.
 

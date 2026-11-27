@@ -119,6 +119,9 @@ function matchesSelector(element, compounds) {
 class StubElement {
   constructor(tagName, ownerDocument) {
     this.tagName = String(tagName).toUpperCase()
+    // Real DOM elements are always nodeType 1; code that tells an element from a
+    // text node in a MutationRecord reads it, so the stub has to carry it too.
+    this.nodeType = 1
     this.ownerDocument = ownerDocument
     this.childNodes = []
     this.parentElement = null
@@ -670,6 +673,69 @@ test('repeated observer passes reuse one button and never move a foreign sibling
   assert.equal(bar.lastElementChild, foreign, 'a foreign sibling keeps its position')
   assert.equal(hostButton.parentElement, bar, 'the host own button is untouched')
   assert.equal(row.querySelectorAll('.dshdt-action').length, 1)
+})
+
+// --- the observer must not answer its own write -------------------------------
+//
+// The overlay observes `document.body` to pick up rows the host appends, and
+// `applyDom` then writes injected hosts into those very rows. Re-inserting a host
+// is a childList change, so the observer is handed back the plugin's own write.
+// Reacting to it schedules the next pass, which writes again - a pass loop that
+// never settles. Measured live on a 176-step transcript while the session was
+// idle: one core at 100%, ~320 host moves and ~200 style recalculations per
+// second, frame rate down from 62 to 11.
+
+/** A childList MutationRecord shape, enough for the apply guard to read. */
+function childListRecord(added, removed = []) {
+  return { type: 'childList', addedNodes: added, removedNodes: removed }
+}
+
+/** Deliver one batch to every live observer, the way the platform would. */
+function deliver(env, records) {
+  for (const observer of env.state.observers) if (!observer.disconnected) observer.callback(records)
+}
+
+test('a batch naming only our own injected nodes never schedules another pass', async () => {
+  const { env, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1 })
+  render(env.snapshotFor(row))
+  await env.settle()
+
+  const host = row.querySelector('.dshdt-action-host')
+  assert.ok(host, 'the row carries an injected host')
+  assert.equal(host.nodeType, 1, 'the stub models an element, as the real DOM does')
+
+  const queued = env.state.rafQueue.length
+  deliver(env, [childListRecord([host], [host])])
+  assert.equal(env.state.rafQueue.length, queued, 'moving our own host is not news')
+
+  env.mutate()
+  assert.equal(row.querySelectorAll('.dshdt-action-host').length, 1, 'still exactly one host')
+})
+
+test('a batch naming a host row still wakes the pass', async () => {
+  const { env, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1 })
+  render(env.snapshotFor(row))
+  await env.settle()
+
+  const late = env.document.createElement('div')
+  late.setAttribute('data-chat-flow-key', 'k2')
+  const queued = env.state.rafQueue.length
+  deliver(env, [childListRecord([late])])
+  assert.equal(env.state.rafQueue.length, queued + 1, 'a row the host drew is news')
+})
+
+test('a transcript row stays foreign even after this plugin classes it', async () => {
+  const { env, render } = mountOverlay()
+  const row = env.addRow({ key: 'k1', turn: 1 })
+  render(env.snapshotFor(row))
+  await env.settle()
+  assert.equal(row.classList.contains('dshdt-row'), true, 'the row carries our layout class')
+
+  const queued = env.state.rafQueue.length
+  deliver(env, [childListRecord([row])])
+  assert.equal(env.state.rafQueue.length, queued + 1, 'our class on a host row does not make it ours')
 })
 
 // --- I3 re-apply: a second apply adopts, it never stacks --------------------
